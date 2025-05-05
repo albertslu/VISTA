@@ -1,0 +1,13 @@
+# Core dependencies
+torch>=2.0.0
+monai>=1.2.0
+nibabel>=4.0.0
+numpy>=1.22.0
+pyyaml>=6.0
+einops>=0.6.0
+
+# Optional dependencies
+matplotlib>=3.5.0
+pandas>=1.4.0
+fire>=0.5.0
+tqdm>=4.64.0

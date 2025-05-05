@@ -134,3 +134,40 @@ celerybeat.pid
 dmypy.json
 # Pyre type checker
 .pyre/
+
+# Vista3D package specific files
+vista3d_package/_internal/
+vista3d_package/vista3d/
+vista3d_package/_internal/_tcl_data/encoding/
+*.enc
+**/iso*.enc
+**/koi*.enc
+
+# Vista3D service specific
+vista_service.log
+service_output.log
+service_startup.log
+
+# Large binaries
+*.exe
+*.wasm
+*.dll
+
+# Output directories
+test_output/
+**/output/
+**/processed/
+**/failed/
+
+# Temporary files
+*.tmp
+*.temp
+
+# Configuration with potential sensitive info
+# Uncomment if your config contains API keys or credentials
+# config.yaml  
+
+# IDE specific files
+.vscode/
+.idea/
+*.swp

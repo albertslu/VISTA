@@ -27,7 +27,7 @@ import numpy as np
 import torch
 import torch.distributed as dist
 import yaml
-from data.datasets import (
+from vista3d.data.datasets import (
     compute_dataset_weights,
     get_class_names,
     get_datalist_with_dataset_name,
