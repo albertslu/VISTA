@@ -21,6 +21,7 @@ import traceback
 import yaml
 from datetime import datetime
 from pathlib import Path
+import monai
 
 # Configure logging
 logging.basicConfig(
@@ -186,6 +187,7 @@ def run_vista3d_task(task_data, config):
                 point_label=[label],
                 save_mask=True
             )
+
         else:
             # Full segmentation
             from vista3d.scripts.infer import EVERYTHING_PROMPT
@@ -213,6 +215,26 @@ def run_vista3d_task(task_data, config):
                 logger.info(f"Segmentation saved successfully")
                 file_size = os.path.getsize(output_file) / 1024
                 logger.info(f"Output size: {file_size:.2f} KB")
+
+                # If point-based segmentation was successful, create vista_roi.json
+                if segmentation_type == "point":
+                    vista_roi_base_dir = config["output"]["default_directory"]
+                    os.makedirs(vista_roi_base_dir, exist_ok=True) # Ensure the directory exists
+                    vista_roi_path = os.path.join(vista_roi_base_dir, "vista_roi.json")
+                    
+                    roi_info = {
+                        "ROIIndex": task_data["label"], 
+                        "ROIName": f"VISTA3D_Point_Label_{task_data['label']}",
+                        "ROIColor": [1.0, 0.0, 0.0],  # Red color for the point-based segmentation
+                        "visible": True
+                    }
+                    vista_roi_content = {"rois": [roi_info]}
+                    with open(vista_roi_path, 'w') as f_roi:
+                        json.dump(vista_roi_content, f_roi, indent=2)
+                    logger.info(f"Saved VISTA ROI info for point segmentation to: {vista_roi_path}")
+
+
+                
                 return True, f"Segmentation completed successfully. Output: {output_file}"
         
         return False, "Inference failed to produce valid output"
@@ -276,7 +298,7 @@ def process_task_file(task_file, processed_dir, failed_dir, config):
         shutil.move(task_file, os.path.join(failed_dir, os.path.basename(task_file)))
         return False
 
-def monitor_tasks_folder(tasks_dir, processed_dir, failed_dir, interval=30, config=None):
+def monitor_tasks_folder(tasks_dir, processed_dir, failed_dir, interval=5, config=None):
     """Monitor tasks folder for new task files."""
     logger.info(f"Starting VISTA3D service. Monitoring {tasks_dir} every {interval} seconds")
     

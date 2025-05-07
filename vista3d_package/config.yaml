@@ -17,5 +17,5 @@ vista3d:
 
 # Output settings
 output:
-  default_directory: "./output"      # Default output directory if not specified in task
+  default_directory: "../ARTDaemon/SegmanRepo"      # Default output directory if not specified in task
   save_format: "nii.gz"              # Output file format
