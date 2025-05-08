@@ -247,7 +247,7 @@ def process_task_file(task_file, taskshistory_dir, config):
             task_data = json.load(f)
         
         task_id = task_data.get("task_id", os.path.basename(task_file))
-        logger.info(f"Processing task: {task_id}")
+        logger.info(f"Task Data: {task_data}")
         
         # Validate task
         valid, message = validate_task(task_data)
@@ -260,20 +260,18 @@ def process_task_file(task_file, taskshistory_dir, config):
         
         # Run VISTA3D
         success, result_message = run_vista3d_task(task_data, config)
-        
+        print("1")
         # Create result file
         result_data = {
             "task_id": task_id,
             "processed_time": datetime.now().isoformat(),
             "success": success,
-            "message": result_message
+            "message": result_message,
+            "output_mask": task_data.get('output_directory')+"ct_seg.nii.gz"
         }
-        
-        result_file = os.path.join(
-            task_data["output_directory"], 
-            f"{task_id}_result.json"
-        )
-        
+        print("2")
+        result_file = os.path.join(taskshistory_dir, f"{task_id}_result.json")
+        print("result_file:", result_file)
         with open(result_file, 'w') as f:
             json.dump(result_data, f, indent=2)
         
