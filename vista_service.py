@@ -7,7 +7,7 @@ This service monitors a folder for task files and automatically runs
 VISTA3D segmentation based on the specifications in each task.
 
 Usage:
-    python vista_service.py --config config.yaml
+    python vista_service.py --config config.json
 """
 
 import os
@@ -18,7 +18,6 @@ import shutil
 import logging
 import argparse
 import traceback
-import yaml
 from datetime import datetime
 from pathlib import Path
 import monai
@@ -34,11 +33,11 @@ logging.basicConfig(
 )
 logger = logging.getLogger("VISTA3D-Service")
 
-def load_config(config_file="config.yaml"):
-    """Load configuration from YAML file."""
+def load_config(config_file="config.json"):
+    """Load configuration from JSON file."""
     try:
         with open(config_file, 'r') as f:
-            config = yaml.safe_load(f)
+            config = json.load(f)
         logger.info(f"Loaded configuration from {config_file}")
         return config
     except Exception as e:
@@ -47,9 +46,8 @@ def load_config(config_file="config.yaml"):
         return {
             "service": {
                 "base_directory": "./vista_service",
-                "tasks_directory": "tasks",
-                "processed_directory": "processed",
-                "failed_directory": "failed",
+                "tasks_directory": "Tasks",
+                "taskshistory_directory": "TasksHistory",
                 "check_interval": 30,
                 "log_file": "vista_service.log"
             },
@@ -68,18 +66,15 @@ def setup_folders(base_dir, config=None):
     """Create necessary folder structure."""
     if config and "service" in config:
         tasks_dir = os.path.join(base_dir, config["service"]["tasks_directory"])
-        processed_dir = os.path.join(base_dir, config["service"]["processed_directory"])
-        failed_dir = os.path.join(base_dir, config["service"]["failed_directory"])
+        taskshistory_dir = os.path.join(base_dir, config["service"]["taskshistory_directory"])
     else:
         tasks_dir = os.path.join(base_dir, "tasks")
-        processed_dir = os.path.join(base_dir, "processed")
-        failed_dir = os.path.join(base_dir, "failed")
+        taskshistory_dir = os.path.join(base_dir, "taskshistory")
     
     os.makedirs(tasks_dir, exist_ok=True)
-    os.makedirs(processed_dir, exist_ok=True)
-    os.makedirs(failed_dir, exist_ok=True)
+    os.makedirs(taskshistory_dir, exist_ok=True)
     
-    return tasks_dir, processed_dir, failed_dir
+    return tasks_dir, taskshistory_dir
 
 def validate_task(task_data):
     """Validate task file contents."""
@@ -244,7 +239,7 @@ def run_vista3d_task(task_data, config):
         logger.error(traceback.format_exc())
         return False, f"Error: {str(e)}"
 
-def process_task_file(task_file, processed_dir, failed_dir, config):
+def process_task_file(task_file, taskshistory_dir, config):
     """Process a single task file."""
     try:
         # Load task data
@@ -258,8 +253,9 @@ def process_task_file(task_file, processed_dir, failed_dir, config):
         valid, message = validate_task(task_data)
         if not valid:
             logger.error(f"Task validation failed: {message}")
-            # Move to failed directory
-            shutil.move(task_file, os.path.join(failed_dir, os.path.basename(task_file)))
+            # Move to history directory with failure indicator
+            destination = os.path.join(taskshistory_dir, f"failed_{os.path.basename(task_file)}")
+            shutil.move(task_file, destination)
             return False
         
         # Run VISTA3D
@@ -281,12 +277,13 @@ def process_task_file(task_file, processed_dir, failed_dir, config):
         with open(result_file, 'w') as f:
             json.dump(result_data, f, indent=2)
         
-        # Move task file to processed directory
+        # Move task file to history directory with appropriate prefix
+        destination = os.path.join(taskshistory_dir, f"{os.path.basename(task_file)}")
+        shutil.move(task_file, destination)
+        
         if success:
-            shutil.move(task_file, os.path.join(processed_dir, os.path.basename(task_file)))
             logger.info(f"Task {task_id} completed successfully")
         else:
-            shutil.move(task_file, os.path.join(failed_dir, os.path.basename(task_file)))
             logger.error(f"Task {task_id} failed: {result_message}")
         
         return success
@@ -294,11 +291,12 @@ def process_task_file(task_file, processed_dir, failed_dir, config):
     except Exception as e:
         logger.error(f"Error processing task file {task_file}: {str(e)}")
         logger.error(traceback.format_exc())
-        # Move to failed directory
-        shutil.move(task_file, os.path.join(failed_dir, os.path.basename(task_file)))
+        # Move to history directory with error indicator
+        destination = os.path.join(taskshistory_dir, f"error_{os.path.basename(task_file)}")
+        shutil.move(task_file, destination)
         return False
 
-def monitor_tasks_folder(tasks_dir, processed_dir, failed_dir, interval=5, config=None):
+def monitor_tasks_folder(tasks_dir, taskshistory_dir, interval=5, config=None):
     """Monitor tasks folder for new task files."""
     logger.info(f"Starting VISTA3D service. Monitoring {tasks_dir} every {interval} seconds")
     
@@ -312,7 +310,7 @@ def monitor_tasks_folder(tasks_dir, processed_dir, failed_dir, interval=5, confi
                 
                 # Process each task file
                 for task_file in task_files:
-                    process_task_file(task_file, processed_dir, failed_dir, config)
+                    process_task_file(task_file, taskshistory_dir, config)
             
             # Wait for next check
             time.sleep(interval)
@@ -329,7 +327,7 @@ def monitor_tasks_folder(tasks_dir, processed_dir, failed_dir, interval=5, confi
 def main():
     """Main entry point for the script."""
     parser = argparse.ArgumentParser(description="VISTA3D Service")
-    parser.add_argument("--config", default="config.yaml", help="Path to configuration file")
+    parser.add_argument("--config", default="config.json", help="Path to configuration file")
     parser.add_argument("--base_dir", help="Base directory for service files (overrides config)")
     parser.add_argument("--interval", type=int, help="Interval in seconds to check for new tasks (overrides config)")
     
@@ -343,10 +341,10 @@ def main():
     interval = args.interval or config["service"]["check_interval"]
     
     # Setup folders
-    tasks_dir, processed_dir, failed_dir = setup_folders(base_dir, config)
+    tasks_dir, taskshistory_dir = setup_folders(base_dir, config)
     
     # Start monitoring
-    monitor_tasks_folder(tasks_dir, processed_dir, failed_dir, interval, config)
+    monitor_tasks_folder(tasks_dir, taskshistory_dir, interval, config)
     
     return 0
 

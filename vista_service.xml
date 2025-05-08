@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<service>
+  <id>NeuralRad_Vista3D</id>
+  <name>Vista3D Service</name>
+  <description>Monitors for tasks to create segmentations.</description>
+  <executable>vista_service.exe</executable>
+  <workingdirectory>%BASE%\</workingdirectory>
+  <logpath>WinSWLogs</logpath>
+  <log mode="roll-by-size">
+    <sizeThreshold>10240</sizeThreshold>
+    <keepFiles>3</keepFiles>
+  </log>
+</service>

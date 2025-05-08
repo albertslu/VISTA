@@ -1,0 +1,18 @@
+{
+  "service": {
+    "base_directory": "C:/ARTDaemon/SegmanRepo/dcm2nifti",
+    "tasks_directory": "Tasks/Vista3D",
+    "taskshistory_directory": "TasksHistory/Vista3D",
+    "check_interval": 3,
+    "log_file": "vista_service.log"
+  },
+  "vista3d": {
+    "config_file": "./vista3d/configs/infer.yaml",
+    "device": "auto",
+    "memory_efficient": true
+  },
+  "output": {
+    "default_directory": "../ARTDaemon/SegmanRepo",
+    "save_format": "nii.gz"
+  }
+}

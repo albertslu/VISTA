@@ -1,0 +1,1 @@
+vista_service status

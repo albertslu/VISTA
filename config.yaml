@@ -3,9 +3,9 @@
 # Service settings
 service:
   base_directory: "C:/ARTDaemon/Segman/dcm2nifti"  # Base directory for service files
-  tasks_directory: "Tasks/Vista3D/tasks"           # Subdirectory for task files
-  processed_directory: "Tasks/Vista3D/processed"   # Subdirectory for processed tasks
-  failed_directory: "Tasks/Vista3D/failed"         # Subdirectory for failed tasks
+  tasks_directory: "Tasks/Vista3D"           # Subdirectory for task files
+  processed_directory: "TasksHistory/Vista3D"   # Subdirectory for processed tasks
+  failed_directory: "TasksHistory/Vista3D"         # Subdirectory for failed tasks
   check_interval: 10                              # Interval in seconds to check for new tasks
   log_file: "vista_service.log"                   # Log file name
 
