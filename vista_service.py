@@ -1,3 +1,4 @@
+# vista_service.py
 #!/usr/bin/env python
 """
 VISTA3D Service - Automated Medical Image Segmentation
@@ -21,6 +22,17 @@ import traceback
 from datetime import datetime
 from pathlib import Path
 import monai
+
+try:
+    import torch
+    import numpy as np
+    import nibabel as nib
+except ImportError as e:
+    logging.warning(f"PyTorch, NumPy, or Nibabel not found. Some features might be limited: {e}")
+    torch = None
+    np = None
+    nib = None
+
 
 # Configure logging
 logging.basicConfig(
@@ -80,60 +92,79 @@ def validate_task(task_data):
     """Validate task file contents."""
     required_fields = ["task_id", "input_file", "output_directory"]
     
-    # Check required fields
     for field in required_fields:
         if field not in task_data:
             return False, f"Missing required field: {field}"
     
-    # Check input file exists
     if not os.path.exists(task_data["input_file"]):
         return False, f"Input file does not exist: {task_data['input_file']}"
     
-    # Check segmentation type
-    if "segmentation_type" in task_data:
-        if task_data["segmentation_type"] not in ["full", "point"]:
-            return False, f"Invalid segmentation type: {task_data['segmentation_type']}"
+    segmentation_type = task_data.get("segmentation_type", "full") # Default to full
+    task_data["segmentation_type"] = segmentation_type # Ensure it's in task_data for later use
+
+    if segmentation_type not in ["full", "point"]:
+        return False, f"Invalid segmentation type: {segmentation_type}"
         
-        # For point-based segmentation, check required fields
-        if task_data["segmentation_type"] == "point":
-            if "point_coordinates" not in task_data:
-                return False, "Missing point coordinates for point-based segmentation"
-            if "label" not in task_data:
-                return False, "Missing label for point-based segmentation"
+    if segmentation_type == "point":
+        if not all([torch, np, nib]):
+            return False, "PyTorch, NumPy, or Nibabel is not installed. 'point' segmentation is unavailable."
+        if "segmentation_prompts" not in task_data:
+            return False, "Missing 'segmentation_prompts' for point segmentation"
+        if not isinstance(task_data["segmentation_prompts"], list) or not task_data["segmentation_prompts"]:
+            return False, "'segmentation_prompts' must be a non-empty list"
+
+        for i, prompt_spec in enumerate(task_data["segmentation_prompts"]):
+            if not isinstance(prompt_spec, dict):
+                return False, f"Prompt spec at index {i} must be a dictionary"
+            if "target_output_label" not in prompt_spec or not isinstance(prompt_spec["target_output_label"], int):
+                return False, f"Missing or invalid 'target_output_label' (must be int) in prompt spec at index {i}"
+            
+            positive_points = prompt_spec.get("positive_points", [])
+            negative_points = prompt_spec.get("negative_points", [])
+
+            if not isinstance(positive_points, list) or not isinstance(negative_points, list):
+                return False, f"positive_points/negative_points must be lists in prompt spec at index {i}"
+            
+            if not positive_points and not negative_points:
+                 return False, f"At least one positive or negative point must be provided for prompt spec at index {i} (target_label: {prompt_spec['target_output_label']})"
+
+            for p_type_name, points_list in [("positive_points", positive_points), ("negative_points", negative_points)]:
+                for p_coord in points_list:
+                    if not isinstance(p_coord, list) or len(p_coord) != 3:
+                        return False, f"Each point in '{p_type_name}' must be a list of 3 numbers (x,y,z) in prompt spec at index {i}"
+                    if not all(isinstance(c, (int, float)) for c in p_coord):
+                        return False, f"Point coordinates must be numbers in '{p_type_name}' in prompt spec at index {i}"
     
     return True, "Task is valid"
 
 def get_optimal_device(device_preference="auto"):
     """Get the optimal device for inference based on availability and preference."""
-    if device_preference != "auto" and device_preference.startswith("cuda"):
-        # Try to use the specified CUDA device
-        try:
-            import torch
-            device = torch.device(device_preference)
-            # Test with a small tensor
-            test_tensor = torch.zeros(1, device=device)
-            del test_tensor
-            logger.info(f"Using specified device: {device_preference}")
-            return device_preference
-        except Exception as e:
-            logger.warning(f"Specified device {device_preference} test failed: {str(e)}")
-    
     # Auto-detect best device
     try:
-        import torch
+        if torch is None: # PyTorch not available
+            logger.warning("PyTorch not available, defaulting to CPU for device selection logic.")
+            return "cpu"
+
+        if device_preference != "auto" and device_preference.startswith("cuda"):
+            try:
+                device = torch.device(device_preference)
+                test_tensor = torch.zeros(1, device=device) # Test specified CUDA device
+                del test_tensor
+                logger.info(f"Using specified device: {device_preference}")
+                return device_preference
+            except Exception as e:
+                logger.warning(f"Specified device {device_preference} test failed: {str(e)}. Falling back to auto-detection.")
+        
         if torch.cuda.is_available():
-            # Try to use CUDA
             try:
                 device = torch.device("cuda:0")
-                # Test with a small tensor
                 test_tensor = torch.zeros(1, device=device)
                 del test_tensor
-                logger.info("Using CUDA device")
+                logger.info("Using CUDA device (cuda:0)")
                 return "cuda:0"
             except Exception as e:
                 logger.warning(f"CUDA device test failed: {str(e)}")
         
-        # Try to use MPS (for Mac)
         if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
             try:
                 device = torch.device("mps")
@@ -143,155 +174,244 @@ def get_optimal_device(device_preference="auto"):
                 return "mps"
             except Exception as e:
                 logger.warning(f"MPS device test failed: {str(e)}")
-    except ImportError:
+    except ImportError: # This case should be caught by torch is None check earlier
         logger.warning("PyTorch not available, defaulting to CPU")
     
-    # Fallback to CPU
     logger.info("Using CPU device")
     return "cpu"
 
 def run_vista3d_task(task_data, config):
     """Run VISTA3D segmentation based on task specifications."""
-    from vista3d.scripts.infer import InferClass
+    from vista3d.scripts.infer import InferClass, EVERYTHING_PROMPT
     
-    # Create output directory
     os.makedirs(task_data["output_directory"], exist_ok=True)
-    
-    # Get device from config
     device = get_optimal_device(config["vista3d"]["device"])
     
-    # Initialize inference with device override
     infer_obj = InferClass(
         config_file=config["vista3d"]["config_file"],
-        device=device
+        device=device # Pass the determined device to InferClass
     )
     
     try:
-        # Determine segmentation type
-        segmentation_type = task_data.get("segmentation_type", "full")
-        
-        if segmentation_type == "point":
-            # Point-based segmentation
-            point = task_data["point_coordinates"]
-            label = task_data["label"]
-            
-            logger.info(f"Running point-based segmentation at {point} for label {label}")
-            result = infer_obj.infer(
-                image_file=task_data["input_file"],
-                point=[point],  # Format as [[x,y,z]]
-                point_label=[label],
-                save_mask=True
-            )
+        segmentation_type = task_data["segmentation_type"] # Already validated and set
 
-        else:
-            # Full segmentation
-            from vista3d.scripts.infer import EVERYTHING_PROMPT
+        if segmentation_type == "point":
+            if not all([torch, np, nib]): # Should have been caught by validation
+                 return False, "Cannot run 'point': PyTorch, NumPy or Nibabel missing."
+
+            logger.info("Running point-based segmentation for multiple target labels.")
+            all_individual_segmentations = []
+            processed_target_labels = []
+            first_processed_mask_metadata = None
+
+            # Clear infer_obj cache if it exists and is used for image data across calls
+            if hasattr(infer_obj, 'clear_cache') and callable(infer_obj.clear_cache):
+                infer_obj.clear_cache()
+                logger.info("Cleared infer_obj cache for point segmentation.")
+
+            initial_image_data_for_transform = task_data["input_file"]
+
+            for i, prompt_spec in enumerate(task_data.get("segmentation_prompts", [])):
+                target_label = prompt_spec["target_output_label"]
+                positive_points = prompt_spec.get("positive_points", [])
+                negative_points = prompt_spec.get("negative_points", [])
+                
+                current_points = positive_points + negative_points
+                if not current_points:
+                    logger.warning(f"No points for target_label {target_label}. Skipping.")
+                    continue
+
+                current_point_types = [1] * len(positive_points) + [0] * len(negative_points)
+
+                logger.info(f"Processing target_label: {target_label} with {len(positive_points)} pos, {len(negative_points)} neg points.")
+                
+                # If infer_obj.batch_data is cached, clear for subsequent calls if needed
+                # The check/call above should handle this for the whole loop.
+                # If more granular control is needed per-prompt, add infer_obj.clear_cache() here.
+
+                result_tensor = infer_obj.infer(
+                    image_file=initial_image_data_for_transform,
+                    point=current_points,
+                    point_label=current_point_types,
+                    prompt_class=[target_label], 
+                    save_mask=False # Aggregate and save once
+                )
+                
+                if result_tensor is not None:
+                    all_individual_segmentations.append({
+                        "label_id": target_label,
+                        "mask_tensor": result_tensor.cpu()
+                    })
+                    processed_target_labels.append(target_label)
+                    if first_processed_mask_metadata is None:
+                        if hasattr(result_tensor, 'affine') and hasattr(result_tensor, 'shape'):
+                             first_processed_mask_metadata = {
+                                'affine': result_tensor.affine.cpu().numpy() if hasattr(result_tensor.affine, 'cpu') else result_tensor.affine,
+                                'shape': result_tensor.shape
+                            }
+                        else:
+                            logger.warning("Could not get metadata directly from first result tensor.")
+                else:
+                    logger.warning(f"Inference failed for target_label: {target_label}")
+
+            if not all_individual_segmentations or first_processed_mask_metadata is None:
+                return False, "Point segmentation failed: no results or metadata unavailable."
+
+            final_mask_shape = first_processed_mask_metadata['shape']
+            if len(final_mask_shape) == 4 and final_mask_shape[0] == 1: # Expected [1, H, W, D]
+                final_mask_shape = final_mask_shape[1:]
+            
+            final_combined_mask = torch.zeros(final_mask_shape, dtype=torch.int16)
+
+            for seg_info in all_individual_segmentations:
+                label_id = seg_info["label_id"]
+                mask_tensor = seg_info["mask_tensor"] # Expected [1,H,W,D] from infer
+                
+                # Binarize: assume positive values in mask_tensor mean presence of the class
+                # Squeeze to remove channel dim: [H,W,D]
+                binary_class_mask = (mask_tensor.squeeze(0) > 0.5).long() 
+                final_combined_mask[binary_class_mask == 1] = label_id
+            
+            output_file = os.path.join(task_data["output_directory"], "ct_seg.nii.gz")
+            nifti_img = nib.Nifti1Image(final_combined_mask.numpy().astype(np.int16), 
+                                        first_processed_mask_metadata['affine'])
+            nib.save(nifti_img, output_file)
+            logger.info(f"Saved combined multi-label segmentation to: {output_file}")
+
+            # Generate vista_roi.json
+            vista_roi_path = os.path.join(task_data["output_directory"], "vista_roi.json")
+            unique_labels_for_roi = sorted(list(set(processed_target_labels)))
+            rois_list = []
+            roi_colors = [[1.0,0.0,0.0],[0.0,1.0,0.0],[0.0,0.0,1.0],[1.0,1.0,0.0],[1.0,0.0,1.0],[0.0,1.0,1.0]]
+            for i, label_val in enumerate(unique_labels_for_roi):
+                rois_list.append({
+                    "ROIIndex": label_val, "ROIName": f"VISTA3D_Point_Label_{label_val}",
+                    "ROIColor": roi_colors[i % len(roi_colors)], "visible": True
+                })
+            with open(vista_roi_path, 'w') as f_roi:
+                json.dump({"rois": rois_list}, f_roi, indent=2)
+            logger.info(f"Saved VISTA ROI info to: {vista_roi_path}")
+            return True, "Point segmentation completed successfully."
+
+        else: # Full segmentation
             logger.info(f"Running full segmentation with {len(EVERYTHING_PROMPT)} labels")
             result = infer_obj.infer(
                 image_file=task_data["input_file"],
-                save_mask=True,
+                save_mask=True, # As per original logic
                 label_prompt=EVERYTHING_PROMPT 
             )
-        
-        # Save output
-        if result is not None:
-            import nibabel as nib
-            import numpy as np
-            
-            output_file = os.path.join(task_data["output_directory"], "ct_seg.nii.gz")
-            logger.info(f"Saving segmentation to: {output_file}")
-            
-            # Convert and save as NIfTI
-            result_np = result.cpu().numpy().astype(np.float32)
-            nifti_img = nib.Nifti1Image(result_np[0], np.eye(4))
-            nib.save(nifti_img, output_file)
-            
-            if os.path.exists(output_file):
-                logger.info(f"Segmentation saved successfully")
-                file_size = os.path.getsize(output_file) / 1024
-                logger.info(f"Output size: {file_size:.2f} KB")
-
-                # If point-based segmentation was successful, create vista_roi.json
-                if segmentation_type == "point":
-                    vista_roi_base_dir = config["output"]["default_directory"]
-                    os.makedirs(vista_roi_base_dir, exist_ok=True) # Ensure the directory exists
-                    vista_roi_path = os.path.join(vista_roi_base_dir, "vista_roi.json")
-                    
-                    roi_info = {
-                        "ROIIndex": task_data["label"], 
-                        "ROIName": f"VISTA3D_Point_Label_{task_data['label']}",
-                        "ROIColor": [1.0, 0.0, 0.0],  # Red color for the point-based segmentation
-                        "visible": True
-                    }
-                    vista_roi_content = {"rois": [roi_info]}
-                    with open(vista_roi_path, 'w') as f_roi:
-                        json.dump(vista_roi_content, f_roi, indent=2)
-                    logger.info(f"Saved VISTA ROI info for point segmentation to: {vista_roi_path}")
-
-
+            # Similar to "point" mode, if `save_mask=True` is used, `infer` returns the tensor.
+            if result is not None:
+                output_file = os.path.join(task_data["output_directory"], "ct_seg.nii.gz")
+                logger.info(f"Saving full segmentation to: {output_file}")
                 
-                return True, f"Segmentation completed successfully. Output: {output_file}"
-        
-        return False, "Inference failed to produce valid output"
+                result_np = result.cpu().numpy().astype(np.float32) # Or np.int16
+                nifti_img = nib.Nifti1Image(result_np[0], result.affine.cpu().numpy() if hasattr(result, 'affine') else np.eye(4))
+                nib.save(nifti_img, output_file)
+                
+                if os.path.exists(output_file):
+                    logger.info(f"Full segmentation saved successfully")
+                    # No vista_roi.json for full segmentation by default in this service
+                    return True, "Full segmentation completed successfully."
+                else:
+                    return False, "Failed to save full segmentation."
+            else:
+                return False, "Full inference failed to produce valid output."
     
     except Exception as e:
-        logger.error(f"Error during inference: {str(e)}")
+        logger.error(f"Error during VISTA3D task execution: {str(e)}")
         logger.error(traceback.format_exc())
         return False, f"Error: {str(e)}"
 
 def process_task_file(task_file, taskshistory_dir, config):
     """Process a single task file."""
     try:
-        # Load task data
         with open(task_file, 'r') as f:
             task_data = json.load(f)
         
         task_id = task_data.get("task_id", os.path.basename(task_file))
-        logger.info(f"Task Data: {task_data}")
+        logger.info(f"Processing Task ID: {task_id}, File: {task_file}")
+        # logger.info(f"Task Data: {json.dumps(task_data, indent=2)}") # More readable log
         
-        # Validate task
         valid, message = validate_task(task_data)
         if not valid:
-            logger.error(f"Task validation failed: {message}")
-            # Move to history directory with failure indicator
-            destination = os.path.join(taskshistory_dir, f"failed_{os.path.basename(task_file)}")
+            logger.error(f"Task validation failed for {task_id}: {message}")
+            destination = os.path.join(taskshistory_dir, f"failed_validation_{os.path.basename(task_file)}")
             shutil.move(task_file, destination)
+            # Create a result file indicating validation failure
+            result_data = {
+                "task_id": task_id, "processed_time": datetime.now().isoformat(),
+                "success": False, "message": f"Validation Failed: {message}"
+            }
+            result_file_name = Path(task_file).stem + "_result.json"
+            result_file = os.path.join(taskshistory_dir, result_file_name)
+            with open(result_file, 'w') as f: json.dump(result_data, f, indent=2)
             return False
         
-        # Run VISTA3D
+        logger.info(f"Task {task_id} validated successfully. Type: {task_data['segmentation_type']}")
         success, result_message = run_vista3d_task(task_data, config)
-        print("1")
-        # Create result file
+        
+        # Define output paths for result file
+        output_mask_path = os.path.join(task_data.get('output_directory', './'), "ct_seg.nii.gz")
+        output_labels_path = os.path.join(task_data.get('output_directory', './'), "vista_roi.json")
+        
+        # Check if output files actually exist if success is True
+        if success:
+            if not os.path.exists(output_mask_path):
+                logger.warning(f"Segmentation reported success for task {task_id}, but output mask {output_mask_path} not found.")
+                # success = False # Optionally mark as failed if output is critical
+                # result_message += " (Output mask missing)"
+            if task_data["segmentation_type"] == "point" and not os.path.exists(output_labels_path):
+                 logger.warning(f"Segmentation reported success for task {task_id}, but ROI file {output_labels_path} not found for point-based type.")
+
+
         result_data = {
             "task_id": task_id,
             "processed_time": datetime.now().isoformat(),
             "success": success,
             "message": result_message,
-            "output_mask": task_data.get('output_directory')+"ct_seg.nii.gz"
+            "output_mask": output_mask_path if os.path.exists(output_mask_path) else None,
+            "output_labels": output_labels_path if task_data["segmentation_type"] == "point" and os.path.exists(output_labels_path) else None
         }
-        print("2")
-        result_file = os.path.join(taskshistory_dir, f"{task_id}_result.json")
-        print("result_file:", result_file)
+        
+        result_file_name = Path(task_file).stem + "_result.json"
+        result_file = os.path.join(taskshistory_dir, result_file_name)
+        
         with open(result_file, 'w') as f:
             json.dump(result_data, f, indent=2)
         
-        # Move task file to history directory with appropriate prefix
         destination = os.path.join(taskshistory_dir, f"{os.path.basename(task_file)}")
         shutil.move(task_file, destination)
         
         if success:
-            logger.info(f"Task {task_id} completed successfully")
+            logger.info(f"Task {task_id} completed successfully. Results in {result_file}")
         else:
-            logger.error(f"Task {task_id} failed: {result_message}")
+            logger.error(f"Task {task_id} failed: {result_message}. Results in {result_file}")
         
         return success
     
     except Exception as e:
         logger.error(f"Error processing task file {task_file}: {str(e)}")
         logger.error(traceback.format_exc())
-        # Move to history directory with error indicator
-        destination = os.path.join(taskshistory_dir, f"error_{os.path.basename(task_file)}")
-        shutil.move(task_file, destination)
+        task_id_fallback = Path(task_file).stem
+        destination = os.path.join(taskshistory_dir, f"error_processing_{os.path.basename(task_file)}")
+        try:
+            shutil.move(task_file, destination)
+        except Exception as move_err:
+            logger.error(f"Could not move errored task file {task_file} to history: {move_err}")
+
+        # Create a result file indicating processing error
+        result_data = {
+            "task_id": task_data.get("task_id", task_id_fallback) if 'task_data' in locals() else task_id_fallback,
+            "processed_time": datetime.now().isoformat(),
+            "success": False, "message": f"Unhandled error during task processing: {str(e)}"
+        }
+        result_file_name = Path(task_file).stem + "_result.json"
+        result_file = os.path.join(taskshistory_dir, result_file_name)
+        try:
+            with open(result_file, 'w') as f: json.dump(result_data, f, indent=2)
+        except Exception as res_err:
+             logger.error(f"Could not write result file for errored task {task_file}: {res_err}")
         return False
 
 def monitor_tasks_folder(tasks_dir, taskshistory_dir, interval=5, config=None):
@@ -300,17 +420,16 @@ def monitor_tasks_folder(tasks_dir, taskshistory_dir, interval=5, config=None):
     
     while True:
         try:
-            # Get all JSON files in tasks directory
-            task_files = [os.path.join(tasks_dir, f) for f in os.listdir(tasks_dir) if f.endswith('.json')]
+            task_files = [os.path.join(tasks_dir, f) for f in os.listdir(tasks_dir) if f.endswith('.tsk')]
             
             if task_files:
-                logger.info(f"Found {len(task_files)} task files")
-                
-                # Process each task file
-                for task_file in task_files:
-                    process_task_file(task_file, taskshistory_dir, config)
+                logger.info(f"Found {len(task_files)} task(s): {', '.join(os.path.basename(f) for f in task_files)}")
+                for task_file in sorted(task_files): # Process in sorted order (e.g., by name/timestamp)
+                    if os.path.exists(task_file): # Check if still exists (might be processed by another instance if not careful)
+                        process_task_file(task_file, taskshistory_dir, config)
+                    else:
+                        logger.warning(f"Task file {task_file} disappeared before processing, likely handled by another process or moved.")
             
-            # Wait for next check
             time.sleep(interval)
         
         except KeyboardInterrupt:
@@ -318,9 +437,9 @@ def monitor_tasks_folder(tasks_dir, taskshistory_dir, interval=5, config=None):
             break
         
         except Exception as e:
-            logger.error(f"Error in monitoring loop: {str(e)}")
+            logger.error(f"Critical error in monitoring loop: {str(e)}")
             logger.error(traceback.format_exc())
-            time.sleep(interval)  # Continue monitoring even after error
+            time.sleep(interval * 5) # Longer sleep on critical error
 
 def main():
     """Main entry point for the script."""
@@ -331,20 +450,22 @@ def main():
     
     args = parser.parse_args()
     
-    # Load configuration
     config = load_config(args.config)
     
-    # Override config with command line arguments if provided
-    base_dir = args.base_dir or config["service"]["base_directory"]
-    interval = args.interval or config["service"]["check_interval"]
+    base_dir = args.base_dir if args.base_dir else config.get("service", {}).get("base_directory", "./vista_service")
+    interval = args.interval if args.interval else config.get("service", {}).get("check_interval", 30)
     
-    # Setup folders
     tasks_dir, taskshistory_dir = setup_folders(base_dir, config)
     
-    # Start monitoring
     monitor_tasks_folder(tasks_dir, taskshistory_dir, interval, config)
     
     return 0
 
 if __name__ == "__main__":
+    # Ensure dependencies are checked early if critical
+    if torch is None or np is None or nib is None:
+        logger.warning("One or more core dependencies (PyTorch, NumPy, Nibabel) are missing. "
+                       "Service functionality will be limited, 'point' mode will fail validation.")
+        # sys.exit("Core dependencies missing. Please install PyTorch, NumPy, and Nibabel.") # Optionally exit
+    
     sys.exit(main())
