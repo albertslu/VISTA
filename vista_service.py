@@ -205,16 +205,19 @@ def run_vista3d_task(task_data, config):
             first_processed_mask_metadata = None
 
             # Clear infer_obj cache if it exists and is used for image data across calls
-            if hasattr(infer_obj, 'clear_cache') and callable(infer_obj.clear_cache):
-                infer_obj.clear_cache()
-                logger.info("Cleared infer_obj cache for point segmentation.")
+            # if hasattr(infer_obj, 'clear_cache') and callable(infer_obj.clear_cache):
+            #     infer_obj.clear_cache()
+            #     logger.info("Cleared infer_obj cache for point segmentation.")
 
-            initial_image_data_for_transform = task_data["input_file"]
+            # initial_image_data_for_transform = task_data["input_file"]
 
             for i, prompt_spec in enumerate(task_data.get("segmentation_prompts", [])):
                 target_label = prompt_spec["target_output_label"]
                 positive_points = prompt_spec.get("positive_points", [])
                 negative_points = prompt_spec.get("negative_points", [])
+                display_name = prompt_spec.get("display_name", f"Label {target_label}")
+                print("\n\nprompt_spec:", prompt_spec)
+                print("\ntask_data: ", task_data)
                 
                 current_points = positive_points + negative_points
                 if not current_points:
@@ -228,9 +231,12 @@ def run_vista3d_task(task_data, config):
                 # If infer_obj.batch_data is cached, clear for subsequent calls if needed
                 # The check/call above should handle this for the whole loop.
                 # If more granular control is needed per-prompt, add infer_obj.clear_cache() here.
+                if hasattr(infer_obj, 'clear_cache') and callable(infer_obj.clear_cache):
+                    infer_obj.clear_cache()
+                    logger.info(f"InferClass cache cleared for target_label: {target_label}")
 
                 result_tensor = infer_obj.infer(
-                    image_file=initial_image_data_for_transform,
+                    image_file=task_data["input_file"],
                     point=current_points,
                     point_label=current_point_types,
                     prompt_class=[target_label], 
@@ -240,7 +246,8 @@ def run_vista3d_task(task_data, config):
                 if result_tensor is not None:
                     all_individual_segmentations.append({
                         "label_id": target_label,
-                        "mask_tensor": result_tensor.cpu()
+                        "mask_tensor": result_tensor.cpu(),
+                        "display_name": display_name
                     })
                     processed_target_labels.append(target_label)
                     if first_processed_mask_metadata is None:
@@ -283,10 +290,15 @@ def run_vista3d_task(task_data, config):
             unique_labels_for_roi = sorted(list(set(processed_target_labels)))
             rois_list = []
             roi_colors = [[1.0,0.0,0.0],[0.0,1.0,0.0],[0.0,0.0,1.0],[1.0,1.0,0.0],[1.0,0.0,1.0],[0.0,1.0,1.0]]
-            for i, label_val in enumerate(unique_labels_for_roi):
+            for seg_info in all_individual_segmentations:
+                if seg_info["label_id"] not in unique_labels_for_roi: # Should not happen if processed_target_labels is correct
+                    continue
+                color_idx = unique_labels_for_roi.index(seg_info["label_id"])
                 rois_list.append({
-                    "ROIIndex": label_val, "ROIName": f"VISTA3D_Point_Label_{label_val}",
-                    "ROIColor": roi_colors[i % len(roi_colors)], "visible": True
+                    "ROIIndex": seg_info["label_id"], "ROIName": seg_info["display_name"],
+                    "ROIColor": roi_colors[color_idx % len(roi_colors)], "visible": True
+
+
                 })
             with open(vista_roi_path, 'w') as f_roi:
                 json.dump({"rois": rois_list}, f_roi, indent=2)
