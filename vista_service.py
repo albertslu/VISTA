@@ -285,8 +285,8 @@ def run_vista3d_task(task_data, config):
             nib.save(nifti_img, output_file)
             logger.info(f"Saved combined multi-label segmentation to: {output_file}")
 
-            # Generate vista_roi.json
-            vista_roi_path = os.path.join(task_data["output_directory"], "vista_roi.json")
+            # Generate ct_seg.json
+            vista_roi_path = os.path.join(task_data["output_directory"], "ct_seg.json")
             unique_labels_for_roi = sorted(list(set(processed_target_labels)))
             rois_list = []
             roi_colors = [[1.0,0.0,0.0],[0.0,1.0,0.0],[0.0,0.0,1.0],[1.0,1.0,0.0],[1.0,0.0,1.0],[0.0,1.0,1.0]]
@@ -365,7 +365,7 @@ def process_task_file(task_file, taskshistory_dir, config):
         
         # Define output paths for result file
         output_mask_path = os.path.join(task_data.get('output_directory', './'), "ct_seg.nii.gz")
-        output_labels_path = os.path.join(task_data.get('output_directory', './'), "vista_roi.json")
+        output_labels_path = os.path.join(task_data.get('output_directory', './'), "ct_seg.json")
         
         # Check if output files actually exist if success is True
         if success:
