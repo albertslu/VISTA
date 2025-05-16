@@ -45,12 +45,21 @@ logging.basicConfig(
 )
 logger = logging.getLogger("VISTA3D-Service")
 
+def normalize_path(path, base_dir=None):
+    if path is None:
+        return None
+    path = path.replace('\\', '/')
+    if not os.path.isabs(path) and base_dir:
+        path = os.path.join(base_dir, path)
+    return os.path.normpath(os.path.abspath(path))
+
 def load_config(config_file="config.json"):
     """Load configuration from JSON file."""
     try:
         with open(config_file, 'r') as f:
             config = json.load(f)
         logger.info(f"Loaded configuration from {config_file}")
+        logger.info(f"config: {config}")
         return config
     except Exception as e:
         logger.error(f"Error loading configuration: {str(e)}")
@@ -77,8 +86,8 @@ def load_config(config_file="config.json"):
 def setup_folders(base_dir, config=None):
     """Create necessary folder structure."""
     if config and "service" in config:
-        tasks_dir = os.path.join(base_dir, config["service"]["tasks_directory"])
-        taskshistory_dir = os.path.join(base_dir, config["service"]["taskshistory_directory"])
+        tasks_dir = normalize_path(os.path.join(base_dir, config["service"]["tasks_directory"]))
+        taskshistory_dir = normalize_path(os.path.join(base_dir, config["service"]["taskshistory_directory"]))
     else:
         tasks_dir = os.path.join(base_dir, "tasks")
         taskshistory_dir = os.path.join(base_dir, "taskshistory")
@@ -187,6 +196,8 @@ def run_vista3d_task(task_data, config):
     os.makedirs(task_data["output_directory"], exist_ok=True)
     device = get_optimal_device(config["vista3d"]["device"])
     
+    logger.info(f"Using config file for inference: {config["vista3d"]["config_file"]}")
+
     infer_obj = InferClass(
         config_file=config["vista3d"]["config_file"],
         device=device # Pass the determined device to InferClass

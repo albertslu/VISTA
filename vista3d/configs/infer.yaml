@@ -4,9 +4,9 @@ patch_size: [96, 96, 96]
 bundle_root: './models'
 fold: 0
 infer: 
-  ckpt_name: "C:/VISTA/vista3d/models/model.pt"
+  ckpt_name: "./models/model.pt"
   output_path: "C:/output"
-  log_output_file: "C:/VISTA/vista3d/inference.log"
+  log_output_file: "./inference.log"
 
 resample_to_spacing: [1.5, 1.5, 1.5]
 model: "vista3d_segresnet_d"
