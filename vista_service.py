@@ -300,16 +300,183 @@ def run_vista3d_task(task_data, config):
             vista_roi_path = os.path.join(task_data["output_directory"], "ct_seg.json")
             unique_labels_for_roi = sorted(list(set(processed_target_labels)))
             rois_list = []
-            roi_colors = [[1.0,0.0,0.0],[0.0,1.0,0.0],[0.0,0.0,1.0],[1.0,1.0,0.0],[1.0,0.0,1.0],[0.0,1.0,1.0]]
+            roi_colors = [
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [0.0, 0.0, 1.0],
+                [0.5, 0.5, 1.0],
+                [0.0, 0.5, 1.0],
+                [1.0, 0.5, 1.0],
+                [1.0, 0.5, 0.0],
+                [0.2, 0.5, 0.2],
+                [0.2, 0.8, 0.4],
+                [1.0, 0.0, 0.5],
+                [0.5, 0.0, 0.0],
+                [0.0, 0.5, 0.0],
+                [1.0, 0.0, 0.5],
+                [0.0, 0.5, 0.5],
+                [0.5, 0.0, 1.0],
+                [1.0, 0.2, 0.2],
+                [0.7, 0.7, 0.0],
+                [0.2, 0.2, 0.7],
+                [0.0, 0.7, 0.7],
+                [0.7, 0.0, 0.7],
+                [0.7, 0.5, 0.2],
+                [0.4, 0.7, 0.2],
+                [0.8, 0.2, 0.8],
+                [0.8, 0.8, 0.2],
+                [0.2, 0.8, 0.8],
+                [0.8, 0.2, 0.2],
+                [0.5, 0.2, 0.7],
+                [0.7, 0.5, 0.7],
+                [0.5, 0.7, 0.2],
+                [0.2, 0.7, 0.5],
+                [0.7, 0.2, 0.5],
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [0.0, 0.0, 1.0],
+                [0.5, 0.5, 1.0],
+                [0.0, 0.5, 1.0],
+                [1.0, 0.5, 1.0],
+                [1.0, 0.5, 0.0],
+                [0.2, 0.5, 0.2],
+                [0.2, 0.8, 0.4],
+                [1.0, 0.0, 0.5],
+                [0.5, 0.0, 0.0],
+                [0.0, 0.5, 0.0],
+                [1.0, 0.0, 0.5],
+                [0.0, 0.5, 0.5],
+                [0.5, 0.0, 1.0],
+                [1.0, 0.2, 0.2],
+                [0.7, 0.7, 0.0],
+                [0.2, 0.2, 0.7],
+                [0.0, 0.7, 0.7],
+                [0.7, 0.0, 0.7],
+                [0.7, 0.5, 0.2],
+                [0.4, 0.7, 0.2],
+                [0.8, 0.2, 0.8],
+                [0.8, 0.8, 0.2],
+                [0.2, 0.8, 0.8],
+                [0.8, 0.2, 0.2],
+                [0.5, 0.2, 0.7],
+                [0.7, 0.5, 0.7],
+                [0.5, 0.7, 0.2],
+                [0.2, 0.7, 0.5],
+                [0.7, 0.2, 0.5],
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [0.0, 0.0, 1.0],
+                [0.5, 0.5, 1.0],
+                [0.0, 0.5, 1.0],
+                [1.0, 0.5, 1.0],
+                [1.0, 0.5, 0.0],
+                [0.2, 0.5, 0.2],
+                [0.2, 0.8, 0.4],
+                [1.0, 0.0, 0.5],
+                [0.5, 0.0, 0.0],
+                [0.0, 0.5, 0.0],
+                [1.0, 0.0, 0.5],
+                [0.0, 0.5, 0.5],
+                [0.5, 0.0, 1.0],
+                [1.0, 0.2, 0.2],
+                [0.7, 0.7, 0.0],
+                [0.2, 0.2, 0.7],
+                [0.0, 0.7, 0.7],
+                [0.7, 0.0, 0.7],
+                [0.7, 0.5, 0.2],
+                [0.4, 0.7, 0.2],
+                [0.8, 0.2, 0.8],
+                [0.8, 0.8, 0.2],
+                [0.2, 0.8, 0.8],
+                [0.8, 0.2, 0.2],
+                [0.5, 0.2, 0.7],
+                [0.7, 0.5, 0.7],
+                [0.5, 0.7, 0.2],
+                [0.2, 0.7, 0.5],
+                [0.7, 0.2, 0.5],
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [0.0, 0.0, 1.0],
+                [0.5, 0.5, 1.0],
+                [0.0, 0.5, 1.0],
+                [1.0, 0.5, 1.0],
+                [1.0, 0.5, 0.0],
+                [0.2, 0.5, 0.2],
+                [0.2, 0.8, 0.4],
+                [1.0, 0.0, 0.5],
+                [0.5, 0.0, 0.0],
+                [0.0, 0.5, 0.0],
+                [1.0, 0.0, 0.5],
+                [0.0, 0.5, 0.5],
+                [0.5, 0.0, 1.0],
+                [1.0, 0.2, 0.2],
+                [0.7, 0.7, 0.0],
+                [0.2, 0.2, 0.7],
+                [0.0, 0.7, 0.7],
+                [0.7, 0.0, 0.7],
+                [0.7, 0.5, 0.2],
+                [0.4, 0.7, 0.2],
+                [0.8, 0.2, 0.8],
+                [0.8, 0.8, 0.2],
+                [0.2, 0.8, 0.8],
+                [0.8, 0.2, 0.2],
+                [0.5, 0.2, 0.7],
+                [0.7, 0.5, 0.7],
+                [0.5, 0.7, 0.2],
+                [0.2, 0.7, 0.5],
+                [0.7, 0.2, 0.5]
+            ]
             for seg_info in all_individual_segmentations:
-                if seg_info["label_id"] not in unique_labels_for_roi: # Should not happen if processed_target_labels is correct
+                if seg_info["label_id"] not in unique_labels_for_roi:
                     continue
+
+                current_prompt_spec = None
+                for prompt_spec_item in task_data.get("segmentation_prompts", []):
+                    if prompt_spec_item["target_output_label"] == seg_info["label_id"]:
+                        current_prompt_spec = prompt_spec_item
+                        break
+
+
+                roi_center_physical = None
+
+                if current_prompt_spec:
+                    physical_center_from_rust = current_prompt_spec.get("physical_center_of_box")
+                    if physical_center_from_rust and isinstance(physical_center_from_rust, list) and len(physical_center_from_rust) == 3:
+                        roi_center_physical = physical_center_from_rust
+                    else:
+                        points_for_center_voxel = []
+                        positive_points_voxel = current_prompt_spec.get("positive_points", [])
+                        if positive_points_voxel:
+                            points_for_center_voxel = positive_points_voxel
+                        elif not points_for_center_voxel:
+                            negative_points_voxel = current_prompt_spec.get("negative_points", [])
+                            if negative_points_voxel:
+                                points_for_center_voxel = negative_points_voxel
+                        
+                        if points_for_center_voxel:
+                            # Use the first point from the chosen list
+                            first_voxel_point = np.array(points_for_center_voxel[0] + [1]) # Homogeneous voxel coords
+                            try:
+                                if nib and np: # Ensure nibabel and numpy are available
+                                    img_affine = nib.load(task_data["input_file"]).affine
+                                    physical_coords = img_affine @ first_voxel_point
+                                    roi_center_physical = physical_coords[:3].tolist()
+                                else:
+                                    logger.warning("nibabel or numpy not available for physical coordinate conversion. ROICenter will be voxel.")
+                                    roi_center_physical = points_for_center_voxel[0] # Fallback to voxel
+                            except Exception as e:
+                                logger.warning(f"Could not convert voxel center to physical for ROI {seg_info['label_id']}: {e}")
+                                roi_center_physical = points_for_center_voxel[0] # Fallback to voxel if conversion fails
+
+
+
+
+
                 color_idx = unique_labels_for_roi.index(seg_info["label_id"])
                 rois_list.append({
                     "ROIIndex": seg_info["label_id"], "ROIName": seg_info["display_name"],
-                    "ROIColor": roi_colors[color_idx % len(roi_colors)], "visible": True
-
-
+                    "ROIColor": roi_colors[color_idx % len(roi_colors)], "visible": True, 
+                    "ROICenter": roi_center_physical
                 })
             with open(vista_roi_path, 'w') as f_roi:
                 json.dump({"rois": rois_list}, f_roi, indent=2)
