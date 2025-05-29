@@ -111,8 +111,8 @@ def validate_task(task_data):
     if not os.path.exists(task_data["input_file"]):
         return False, f"Input file does not exist: {task_data['input_file']}"
     
-    segmentation_type = task_data.get("segmentation_type", "full") # Default to full
-    task_data["segmentation_type"] = segmentation_type # Ensure it's in task_data for later use
+    segmentation_type = task_data.get("segmentation_type", "point")
+    task_data["segmentation_type"] = segmentation_type
 
     if segmentation_type not in ["full", "point"]:
         return False, f"Invalid segmentation type: {segmentation_type}"
@@ -130,9 +130,6 @@ def validate_task(task_data):
                 return False, f"Prompt spec at index {i} must be a dictionary"
             if "target_output_label" not in prompt_spec or not isinstance(prompt_spec["target_output_label"], int):
                 return False, f"Missing or invalid 'target_output_label' (must be int) in prompt spec at index {i}"
-            
-            # physical_center_of_box is optional for validation but used for logic later
-            # No specific validation for it here, its presence/absence drives segmentation logic
 
             positive_points = prompt_spec.get("positive_points", [])
             negative_points = prompt_spec.get("negative_points", [])
@@ -154,16 +151,15 @@ def validate_task(task_data):
 
 def get_optimal_device(device_preference="auto"):
     """Get the optimal device for inference based on availability and preference."""
-    # Auto-detect best device
     try:
-        if torch is None: # PyTorch not available
+        if torch is None: 
             logger.warning("PyTorch not available, defaulting to CPU for device selection logic.")
             return "cpu"
 
         if device_preference != "auto" and device_preference.startswith("cuda"):
             try:
                 device = torch.device(device_preference)
-                test_tensor = torch.zeros(1, device=device) # Test specified CUDA device
+                test_tensor = torch.zeros(1, device=device)
                 del test_tensor
                 logger.info(f"Using specified device: {device_preference}")
                 return device_preference
@@ -189,7 +185,7 @@ def get_optimal_device(device_preference="auto"):
                 return "mps"
             except Exception as e:
                 logger.warning(f"MPS device test failed: {str(e)}")
-    except ImportError: # This case should be caught by torch is None check earlier
+    except ImportError:
         logger.warning("PyTorch not available, defaulting to CPU")
     
     logger.info("Using CPU device")
@@ -213,7 +209,7 @@ def _get_roi_center_physical(prompt_spec):
 
 def _centers_are_close(center1, center2, tolerance=1e-3):
     if center1 is None or center2 is None or not isinstance(center1, list) or not isinstance(center2, list) or len(center1) != 3 or len(center2) != 3:
-        return False # If either center is invalid or None, they are not considered "close" for matching purposes.
+        return False
     return np.allclose(np.array(center1), np.array(center2), atol=tolerance)
 
 def run_vista3d_task(task_data, config):
@@ -247,7 +243,7 @@ def run_vista3d_task(task_data, config):
                         existing_data = json.load(f_exist)
                     if "rois" in existing_data and isinstance(existing_data["rois"], list):
                         for roi_entry in existing_data["rois"]:
-                            if "ROIIndex" in roi_entry: # ROICenter might be None
+                            if "ROIIndex" in roi_entry:
                                 existing_rois_map[roi_entry["ROIIndex"]] = roi_entry
                     logger.info(f"Loaded {len(existing_rois_map)} existing ROIs from {vista_roi_path}")
                 except Exception as e:
@@ -266,7 +262,7 @@ def run_vista3d_task(task_data, config):
 
                 existing_roi_entry = existing_rois_map.get(target_label)
                 existing_center_in_json = None
-                if existing_roi_entry: # Ensure entry exists before .get
+                if existing_roi_entry:
                     existing_center_in_json = existing_roi_entry.get("ROICenter")
 
                 if center_from_current_task_prompt is None:
@@ -373,9 +369,9 @@ def run_vista3d_task(task_data, config):
                 logger.info(f"Saved combined multi-label segmentation to: {output_mask_file}")
             elif not segmentation_results_new and os.path.exists(output_mask_file):
                 logger.info(f"No new segmentations. Existing mask {output_mask_file} remains unchanged.")
-            elif not os.path.exists(output_mask_file) and not segmentation_results_new : # no existing mask and no new segs
+            elif not os.path.exists(output_mask_file) and not segmentation_results_new:
                  logger.info("No existing mask and no new segmentations produced. No mask file saved/updated.")
-            else: # Catch-all for other no-save scenarios (e.g. new segs but failed to init mask)
+            else:
                 logger.info("No segmentation mask to save (e.g. no new results and no existing mask, or geometry issue).")
 
 
@@ -418,18 +414,16 @@ def run_vista3d_task(task_data, config):
                         final_json_content_rois.append(existing_roi_entry)
                 logger.info(f"Multiple/zero prompts task: Merged/formed {len(final_json_content_rois)} ROIs for {vista_roi_path}.")
 
-            # Assign colors based on the final list of ROIs
-            # Sort by ROIIndex to ensure consistent color assignment if order changes but set of labels is same
             final_json_content_rois.sort(key=lambda r: r['ROIIndex']) 
-            unique_labels_in_final_json = [r['ROIIndex'] for r in final_json_content_rois] # Already unique and sorted
+            unique_labels_in_final_json = [r['ROIIndex'] for r in final_json_content_rois]
 
             for roi_entry in final_json_content_rois:
                 try:
                     color_idx = unique_labels_in_final_json.index(roi_entry['ROIIndex'])
                     roi_entry['ROIColor'] = roi_colors[color_idx % len(roi_colors)]
-                except ValueError: # Should not happen if logic is correct
+                except ValueError:
                     logger.warning(f"Could not find ROIIndex {roi_entry['ROIIndex']} in unique_labels_in_final_json for color assignment. Using default.")
-                    roi_entry['ROIColor'] = [0.5, 0.5, 0.5] # Default gray
+                    roi_entry['ROIColor'] = [0.5, 0.5, 0.5]
 
 
             with open(vista_roi_path, 'w') as f_final_roi:
@@ -580,7 +574,7 @@ def monitor_tasks_folder(tasks_dir, taskshistory_dir, interval=5, config=None, m
 
                     if discovered_task_files:
                         logger.debug(f"Discovered {len(discovered_task_files)} .tsk files. Checking against active set.")
-                        for task_path in sorted(discovered_task_files): # sorted for deterministic processing order
+                        for task_path in sorted(discovered_task_files):
                             if not os.path.exists(task_path): 
                                 continue
 
