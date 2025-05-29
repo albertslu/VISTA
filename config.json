@@ -3,8 +3,9 @@
     "base_directory": "C:/ARTDaemon/SegmanRepo/dcm2nifti",
     "tasks_directory": "Tasks/Vista3D",
     "taskshistory_directory": "TasksHistory/Vista3D",
-    "check_interval": 3,
-    "log_file": "vista_service.log"
+    "check_interval": 1,
+    "log_file": "vista_service.log",
+    "max_concurrent_tasks": 5
   },
   "vista3d": {
     "config_file": "./vista3d/configs/infer.yaml",

@@ -1,4 +1,3 @@
-# vista_service.py
 #!/usr/bin/env python
 """
 VISTA3D Service - Automated Medical Image Segmentation
@@ -21,7 +20,10 @@ import argparse
 import traceback
 from datetime import datetime
 from pathlib import Path
+import threading # For Lock
+from concurrent.futures import ThreadPoolExecutor
 import monai
+import threading
 
 try:
     import torch
@@ -69,8 +71,9 @@ def load_config(config_file="config.json"):
                 "base_directory": "./vista_service",
                 "tasks_directory": "Tasks",
                 "taskshistory_directory": "TasksHistory",
-                "check_interval": 30,
-                "log_file": "vista_service.log"
+                "check_interval": 1,
+                "log_file": "vista_service.log",
+                "max_concurrent_tasks": 5
             },
             "vista3d": {
                 "config_file": "./vista3d/configs/infer.yaml",
@@ -468,10 +471,6 @@ def run_vista3d_task(task_data, config):
                                 logger.warning(f"Could not convert voxel center to physical for ROI {seg_info['label_id']}: {e}")
                                 roi_center_physical = points_for_center_voxel[0] # Fallback to voxel if conversion fails
 
-
-
-
-
                 color_idx = unique_labels_for_roi.index(seg_info["label_id"])
                 rois_list.append({
                     "ROIIndex": seg_info["label_id"], "ROIName": seg_info["display_name"],
@@ -513,8 +512,11 @@ def run_vista3d_task(task_data, config):
         logger.error(traceback.format_exc())
         return False, f"Error: {str(e)}"
 
-def process_task_file(task_file, taskshistory_dir, config):
+def process_task_file(task_file_path_submitted, taskshistory_dir, config, active_task_paths, active_task_paths_lock):
     """Process a single task file."""
+    # task_file_path_submitted is the path that was added to active_task_paths
+    # We use this specific variable name to avoid confusion if 'task_file' is used locally.
+    task_file = task_file_path_submitted 
     try:
         with open(task_file, 'r') as f:
             task_data = json.load(f)
@@ -603,33 +605,79 @@ def process_task_file(task_file, taskshistory_dir, config):
         except Exception as res_err:
              logger.error(f"Could not write result file for errored task {task_file}: {res_err}")
         return False
+    finally:
+        # This block ensures the task path is removed from the active set
+        # regardless of how process_task_file exits (success, validation fail, exception).
+        with active_task_paths_lock:
+            if task_file_path_submitted in active_task_paths:
+                active_task_paths.remove(task_file_path_submitted)
+                logger.info(f"Task {os.path.basename(task_file_path_submitted)} processing complete, removed from active set.")
+            # else:
+                # This case should ideally not happen if logic is correct,
+                # but can be useful for debugging if it does.
+                # logger.warning(f"Task {os.path.basename(task_file_path_submitted)} was not in active set upon completion attempt.")
 
-def monitor_tasks_folder(tasks_dir, taskshistory_dir, interval=5, config=None):
+
+def monitor_tasks_folder(tasks_dir, taskshistory_dir, interval=5, config=None, max_concurrent_tasks=1):
     """Monitor tasks folder for new task files."""
-    logger.info(f"Starting VISTA3D service. Monitoring {tasks_dir} every {interval} seconds")
-    
-    while True:
+    logger.info(
+        f"Starting VISTA3D service. Monitoring {tasks_dir} every {interval} seconds. "
+        f"Max concurrent tasks: {max_concurrent_tasks}"
+    )
+
+    active_task_paths = set()
+    active_task_paths_lock = threading.Lock()
+
+    with ThreadPoolExecutor(max_workers=max_concurrent_tasks) as executor:
         try:
-            task_files = [os.path.join(tasks_dir, f) for f in os.listdir(tasks_dir) if f.endswith('.tsk')]
-            
-            if task_files:
-                logger.info(f"Found {len(task_files)} task(s): {', '.join(os.path.basename(f) for f in task_files)}")
-                for task_file in sorted(task_files): # Process in sorted order (e.g., by name/timestamp)
-                    if os.path.exists(task_file): # Check if still exists (might be processed by another instance if not careful)
-                        process_task_file(task_file, taskshistory_dir, config)
-                    else:
-                        logger.warning(f"Task file {task_file} disappeared before processing, likely handled by another process or moved.")
-            
-            time.sleep(interval)
-        
-        except KeyboardInterrupt:
-            logger.info("Service stopped by user")
-            break
-        
-        except Exception as e:
-            logger.error(f"Critical error in monitoring loop: {str(e)}")
-            logger.error(traceback.format_exc())
-            time.sleep(interval * 5) # Longer sleep on critical error
+            while True:
+                try:
+                    # List all .tsk files. We will check against active_task_paths.
+                    discovered_task_files = [
+                        os.path.join(tasks_dir, f)
+                        for f in os.listdir(tasks_dir)
+                        if f.endswith('.tsk')
+                    ]
+
+                    if discovered_task_files:
+                        logger.debug(f"Discovered {len(discovered_task_files)} .tsk files. Checking against active set.")
+                        for task_path in sorted(discovered_task_files):
+                            if not os.path.exists(task_path): # Quick check if it disappeared since listdir
+                                continue
+
+                            with active_task_paths_lock:
+                                if task_path in active_task_paths:
+                                    logger.debug(f"Task {os.path.basename(task_path)} is already active. Skipping.")
+                                    continue
+                                # If not active, mark it as active by adding to the set
+                                active_task_paths.add(task_path)
+                                logger.info(f"Task {os.path.basename(task_path)} added to active set for submission.")
+                            
+                            # Submit the task. The lock is released before submission.
+                            try:
+                                logger.info(f"Submitting task {os.path.basename(task_path)} to executor.")
+                                executor.submit(process_task_file, task_path, taskshistory_dir, config, active_task_paths, active_task_paths_lock)
+                            except Exception as e_submit:
+                                logger.error(f"Failed to submit task {os.path.basename(task_path)} to executor: {e_submit}")
+                                # Important: Remove from active set if submission failed
+                                with active_task_paths_lock:
+                                    if task_path in active_task_paths: # Should be
+                                        active_task_paths.remove(task_path)
+                                        logger.info(f"Removed {os.path.basename(task_path)} from active set due to submission failure.")
+                    
+                    time.sleep(interval)
+                
+                except KeyboardInterrupt:
+                    logger.info("Service stopping... waiting for tasks to complete.")
+                    break # Exit while loop, executor shutdown will be handled by 'with' statement
+                
+                except Exception as e:
+                    logger.error(f"Critical error in monitoring loop: {str(e)}")
+                    logger.error(traceback.format_exc())
+                    time.sleep(interval * 5) # Longer sleep on critical error
+        finally:
+            logger.info("VISTA3D service shutting down executor.")
+    logger.info("VISTA3D service monitor loop ended.")
 
 def main():
     """Main entry point for the script."""
@@ -643,11 +691,12 @@ def main():
     config = load_config(args.config)
     
     base_dir = args.base_dir if args.base_dir else config.get("service", {}).get("base_directory", "./vista_service")
-    interval = args.interval if args.interval else config.get("service", {}).get("check_interval", 30)
+    interval = args.interval if args.interval else config.get("service", {}).get("check_interval", 1)
+    max_concurrent_tasks = config.get("service", {}).get("max_concurrent_tasks", 5)
     
     tasks_dir, taskshistory_dir = setup_folders(base_dir, config)
     
-    monitor_tasks_folder(tasks_dir, taskshistory_dir, interval, config)
+    monitor_tasks_folder(tasks_dir, taskshistory_dir, interval, config, max_concurrent_tasks)
     
     return 0
 
