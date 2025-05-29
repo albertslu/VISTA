@@ -131,6 +131,9 @@ def validate_task(task_data):
             if "target_output_label" not in prompt_spec or not isinstance(prompt_spec["target_output_label"], int):
                 return False, f"Missing or invalid 'target_output_label' (must be int) in prompt spec at index {i}"
             
+            # physical_center_of_box is optional for validation but used for logic later
+            # No specific validation for it here, its presence/absence drives segmentation logic
+
             positive_points = prompt_spec.get("positive_points", [])
             negative_points = prompt_spec.get("negative_points", [])
 
@@ -192,6 +195,27 @@ def get_optimal_device(device_preference="auto"):
     logger.info("Using CPU device")
     return "cpu"
 
+def _get_roi_center_physical(prompt_spec):
+    """
+    Retrieves 'physical_center_of_box' from the prompt_spec.
+    Returns the center if valid (list of 3 numbers), otherwise None.
+    """
+    physical_center = prompt_spec.get("physical_center_of_box")
+    if isinstance(physical_center, list) and len(physical_center) == 3:
+        if all(isinstance(c, (int, float)) for c in physical_center):
+            return physical_center
+        else:
+            logger.warning(f"Invalid data types in 'physical_center_of_box' for prompt targeting {prompt_spec.get('target_output_label', 'Unknown')}. Expected numbers.")
+            return None
+    if physical_center is not None: # It exists but is not the expected format
+         logger.warning(f"Malformed 'physical_center_of_box' for prompt targeting {prompt_spec.get('target_output_label', 'Unknown')}. Expected list of 3 numbers.")
+    return None
+
+def _centers_are_close(center1, center2, tolerance=1e-3):
+    if center1 is None or center2 is None or not isinstance(center1, list) or not isinstance(center2, list) or len(center1) != 3 or len(center2) != 3:
+        return False # If either center is invalid or None, they are not considered "close" for matching purposes.
+    return np.allclose(np.array(center1), np.array(center2), atol=tolerance)
+
 def run_vista3d_task(task_data, config):
     """Run VISTA3D segmentation based on task specifications."""
     from vista3d.scripts.infer import InferClass, EVERYTHING_PROMPT
@@ -203,304 +227,234 @@ def run_vista3d_task(task_data, config):
 
     infer_obj = InferClass(
         config_file=config["vista3d"]["config_file"],
-        device=device # Pass the determined device to InferClass
+        device=device
     )
     
     try:
-        segmentation_type = task_data["segmentation_type"] # Already validated and set
+        segmentation_type = task_data["segmentation_type"]
 
         if segmentation_type == "point":
-            if not all([torch, np, nib]): # Should have been caught by validation
+            if not all([torch, np, nib]):
                  return False, "Cannot run 'point': PyTorch, NumPy or Nibabel missing."
+            
+            vista_roi_path = os.path.join(task_data["output_directory"], "ct_seg.json")
+            output_mask_file = os.path.join(task_data["output_directory"], "ct_seg.nii.gz")
 
-            logger.info("Running point-based segmentation for multiple target labels.")
-            all_individual_segmentations = []
-            processed_target_labels = []
-            first_processed_mask_metadata = None
+            existing_rois_map = {}
+            if os.path.exists(vista_roi_path):
+                try:
+                    with open(vista_roi_path, 'r') as f_exist:
+                        existing_data = json.load(f_exist)
+                    if "rois" in existing_data and isinstance(existing_data["rois"], list):
+                        for roi_entry in existing_data["rois"]:
+                            if "ROIIndex" in roi_entry: # ROICenter might be None
+                                existing_rois_map[roi_entry["ROIIndex"]] = roi_entry
+                    logger.info(f"Loaded {len(existing_rois_map)} existing ROIs from {vista_roi_path}")
+                except Exception as e:
+                    logger.warning(f"Could not load existing {vista_roi_path}: {e}. Will proceed as if it's new.")
 
-            # Clear infer_obj cache if it exists and is used for image data across calls
-            # if hasattr(infer_obj, 'clear_cache') and callable(infer_obj.clear_cache):
-            #     infer_obj.clear_cache()
-            #     logger.info("Cleared infer_obj cache for point segmentation.")
-
-            # initial_image_data_for_transform = task_data["input_file"]
+            prompts_to_process = []
+            all_current_task_prompt_details = [] 
 
             for i, prompt_spec in enumerate(task_data.get("segmentation_prompts", [])):
                 target_label = prompt_spec["target_output_label"]
-                positive_points = prompt_spec.get("positive_points", [])
-                negative_points = prompt_spec.get("negative_points", [])
-                display_name = prompt_spec.get("display_name", f"Label {target_label}")
-                print("\n\nprompt_spec:", prompt_spec)
-                print("\ntask_data: ", task_data)
-                
-                current_points = positive_points + negative_points
-                if not current_points:
-                    logger.warning(f"No points for target_label {target_label}. Skipping.")
-                    continue
+                center_from_current_task_prompt = _get_roi_center_physical(prompt_spec)
+                all_current_task_prompt_details.append({
+                    'prompt_spec': prompt_spec, 
+                    'physical_center_from_task': center_from_current_task_prompt
+                })
 
-                current_point_types = [1] * len(positive_points) + [0] * len(negative_points)
+                existing_roi_entry = existing_rois_map.get(target_label)
+                existing_center_in_json = None
+                if existing_roi_entry: # Ensure entry exists before .get
+                    existing_center_in_json = existing_roi_entry.get("ROICenter")
 
-                logger.info(f"Processing target_label: {target_label} with {len(positive_points)} pos, {len(negative_points)} neg points.")
-                
-                # If infer_obj.batch_data is cached, clear for subsequent calls if needed
-                # The check/call above should handle this for the whole loop.
-                # If more granular control is needed per-prompt, add infer_obj.clear_cache() here.
-                if hasattr(infer_obj, 'clear_cache') and callable(infer_obj.clear_cache):
-                    infer_obj.clear_cache()
-                    logger.info(f"InferClass cache cleared for target_label: {target_label}")
-
-                result_tensor = infer_obj.infer(
-                    image_file=task_data["input_file"],
-                    point=current_points,
-                    point_label=current_point_types,
-                    prompt_class=[target_label], 
-                    save_mask=False # Aggregate and save once
-                )
-                
-                if result_tensor is not None:
-                    all_individual_segmentations.append({
-                        "label_id": target_label,
-                        "mask_tensor": result_tensor.cpu(),
-                        "display_name": display_name
-                    })
-                    processed_target_labels.append(target_label)
-                    if first_processed_mask_metadata is None:
-                        if hasattr(result_tensor, 'affine') and hasattr(result_tensor, 'shape'):
-                             first_processed_mask_metadata = {
-                                'affine': result_tensor.affine.cpu().numpy() if hasattr(result_tensor.affine, 'cpu') else result_tensor.affine,
-                                'shape': result_tensor.shape
-                            }
-                        else:
-                            logger.warning("Could not get metadata directly from first result tensor.")
+                if center_from_current_task_prompt is None:
+                    logger.info(f"Prompt for label {target_label} needs processing ('physical_center_of_box' missing or invalid in current task).")
+                    prompts_to_process.append(prompt_spec)
+                elif not _centers_are_close(center_from_current_task_prompt, existing_center_in_json):
+                    logger.info(f"Prompt for label {target_label} needs processing (center changed or new). Task center: {center_from_current_task_prompt}, Existing JSON center: {existing_center_in_json}")
+                    prompts_to_process.append(prompt_spec)
                 else:
-                    logger.warning(f"Inference failed for target_label: {target_label}")
+                    logger.info(f"Skipping segmentation for label {target_label}, task center {center_from_current_task_prompt} matches existing JSON center.")
 
-            if not all_individual_segmentations or first_processed_mask_metadata is None:
-                return False, "Point segmentation failed: no results or metadata unavailable."
+            segmentation_results_new = [] 
+            first_processed_mask_metadata = None
 
-            final_mask_shape = first_processed_mask_metadata['shape']
-            if len(final_mask_shape) == 4 and final_mask_shape[0] == 1: # Expected [1, H, W, D]
-                final_mask_shape = final_mask_shape[1:]
+            if prompts_to_process:
+                logger.info(f"Running point-based segmentation for {len(prompts_to_process)} target labels.")
+                for prompt_spec in prompts_to_process:
+                    target_label = prompt_spec["target_output_label"]
+                    positive_points = prompt_spec.get("positive_points", [])
+                    negative_points = prompt_spec.get("negative_points", [])
+                    display_name = prompt_spec.get("display_name", f"Label {target_label}")
+                    
+                    current_points = positive_points + negative_points
+                    if not current_points: 
+                        logger.warning(f"No points for target_label {target_label} in processing list. Skipping.")
+                        continue
+
+                    current_point_types = [1] * len(positive_points) + [0] * len(negative_points)
+                    logger.info(f"Processing target_label: {target_label} with {len(positive_points)} pos, {len(negative_points)} neg points for segmentation.")
+                    
+                    if hasattr(infer_obj, 'clear_cache') and callable(infer_obj.clear_cache):
+                        infer_obj.clear_cache()
+
+                    result_tensor = infer_obj.infer(
+                        image_file=task_data["input_file"],
+                        point=current_points,
+                        point_label=current_point_types,
+                        prompt_class=[target_label], 
+                        save_mask=False
+                    )
+                    
+                    if result_tensor is not None:
+                        segmentation_results_new.append({
+                            "label_id": target_label,
+                            "mask_tensor": result_tensor.cpu(), 
+                            "display_name": display_name 
+                        })
+                        if first_processed_mask_metadata is None and hasattr(result_tensor, 'affine') and hasattr(result_tensor, 'shape'):
+                            first_processed_mask_metadata = {
+                                'affine': result_tensor.affine.cpu().numpy() if hasattr(result_tensor.affine, 'cpu') else result_tensor.affine,
+                                'shape': result_tensor.shape 
+                            }
+                    else:
+                        logger.warning(f"Inference failed for target_label: {target_label}")
+            else:
+                logger.info("No prompts require new segmentation processing.")
+
+            # Mask Combination
+            final_combined_mask_tensor = None
+            final_mask_affine = None
+            final_mask_shape_3d = None
+
+            if os.path.exists(output_mask_file):
+                try:
+                    existing_mask_nii = nib.load(output_mask_file)
+                    final_combined_mask_tensor = torch.from_numpy(existing_mask_nii.get_fdata().astype(np.int16))
+                    final_mask_affine = existing_mask_nii.affine
+                    final_mask_shape_3d = final_combined_mask_tensor.shape
+                    logger.info(f"Loaded existing mask {output_mask_file} for merging.")
+                except Exception as e:
+                    logger.warning(f"Could not load existing mask {output_mask_file}: {e}. Will try to create new if needed.")
+
+            if segmentation_results_new: 
+                if final_combined_mask_tensor is None: 
+                    if first_processed_mask_metadata:
+                        raw_shape = first_processed_mask_metadata['shape'] 
+                        final_mask_shape_3d = raw_shape[1:] if len(raw_shape) == 4 and raw_shape[0] == 1 else raw_shape
+                        final_combined_mask_tensor = torch.zeros(final_mask_shape_3d, dtype=torch.int16)
+                        final_mask_affine = first_processed_mask_metadata['affine']
+                        logger.info(f"Initialized new empty mask with shape {final_mask_shape_3d}.")
+                    else:
+                        logger.error("New segmentations produced, but no metadata to create a base mask and no existing mask found.")
+                        return False, "Failed to establish mask geometry for new segmentations."
+
+                if final_combined_mask_tensor is not None:
+                    for seg_res in segmentation_results_new:
+                        label_id = seg_res["label_id"]
+                        mask_tensor = seg_res["mask_tensor"] 
+                        
+                        squeezed_mask = mask_tensor.squeeze(0) 
+                        if squeezed_mask.shape != final_mask_shape_3d:
+                            logger.warning(f"Shape mismatch for label {label_id}: mask {squeezed_mask.shape}, base {final_mask_shape_3d}. Skipping merge for this label.")
+                            continue
+
+                        binary_class_mask = (squeezed_mask > 0.5).long()
+                        
+                        final_combined_mask_tensor[final_combined_mask_tensor == label_id] = 0
+                        final_combined_mask_tensor[binary_class_mask == 1] = label_id
+                        logger.info(f"Merged segmentation for label {label_id} into combined mask.")
             
-            final_combined_mask = torch.zeros(final_mask_shape, dtype=torch.int16)
+            if final_combined_mask_tensor is not None and final_mask_affine is not None:
+                nifti_img = nib.Nifti1Image(final_combined_mask_tensor.numpy().astype(np.int16), final_mask_affine)
+                nib.save(nifti_img, output_mask_file)
+                logger.info(f"Saved combined multi-label segmentation to: {output_mask_file}")
+            elif not segmentation_results_new and os.path.exists(output_mask_file):
+                logger.info(f"No new segmentations. Existing mask {output_mask_file} remains unchanged.")
+            elif not os.path.exists(output_mask_file) and not segmentation_results_new : # no existing mask and no new segs
+                 logger.info("No existing mask and no new segmentations produced. No mask file saved/updated.")
+            else: # Catch-all for other no-save scenarios (e.g. new segs but failed to init mask)
+                logger.info("No segmentation mask to save (e.g. no new results and no existing mask, or geometry issue).")
 
-            for seg_info in all_individual_segmentations:
-                label_id = seg_info["label_id"]
-                mask_tensor = seg_info["mask_tensor"] # Expected [1,H,W,D] from infer
-                
-                # Binarize: assume positive values in mask_tensor mean presence of the class
-                # Squeeze to remove channel dim: [H,W,D]
-                binary_class_mask = (mask_tensor.squeeze(0) > 0.5).long() 
-                final_combined_mask[binary_class_mask == 1] = label_id
-            
-            output_file = os.path.join(task_data["output_directory"], "ct_seg.nii.gz")
-            nifti_img = nib.Nifti1Image(final_combined_mask.numpy().astype(np.int16), 
-                                        first_processed_mask_metadata['affine'])
-            nib.save(nifti_img, output_file)
-            logger.info(f"Saved combined multi-label segmentation to: {output_file}")
 
             # Generate ct_seg.json
-            vista_roi_path = os.path.join(task_data["output_directory"], "ct_seg.json")
-            unique_labels_for_roi = sorted(list(set(processed_target_labels)))
-            rois_list = []
-            roi_colors = [
-                [1.0, 0.0, 0.0],
-                [0.0, 1.0, 0.0],
-                [0.0, 0.0, 1.0],
-                [0.5, 0.5, 1.0],
-                [0.0, 0.5, 1.0],
-                [1.0, 0.5, 1.0],
-                [1.0, 0.5, 0.0],
-                [0.2, 0.5, 0.2],
-                [0.2, 0.8, 0.4],
-                [1.0, 0.0, 0.5],
-                [0.5, 0.0, 0.0],
-                [0.0, 0.5, 0.0],
-                [1.0, 0.0, 0.5],
-                [0.0, 0.5, 0.5],
-                [0.5, 0.0, 1.0],
-                [1.0, 0.2, 0.2],
-                [0.7, 0.7, 0.0],
-                [0.2, 0.2, 0.7],
-                [0.0, 0.7, 0.7],
-                [0.7, 0.0, 0.7],
-                [0.7, 0.5, 0.2],
-                [0.4, 0.7, 0.2],
-                [0.8, 0.2, 0.8],
-                [0.8, 0.8, 0.2],
-                [0.2, 0.8, 0.8],
-                [0.8, 0.2, 0.2],
-                [0.5, 0.2, 0.7],
-                [0.7, 0.5, 0.7],
-                [0.5, 0.7, 0.2],
-                [0.2, 0.7, 0.5],
-                [0.7, 0.2, 0.5],
-                [1.0, 0.0, 0.0],
-                [0.0, 1.0, 0.0],
-                [0.0, 0.0, 1.0],
-                [0.5, 0.5, 1.0],
-                [0.0, 0.5, 1.0],
-                [1.0, 0.5, 1.0],
-                [1.0, 0.5, 0.0],
-                [0.2, 0.5, 0.2],
-                [0.2, 0.8, 0.4],
-                [1.0, 0.0, 0.5],
-                [0.5, 0.0, 0.0],
-                [0.0, 0.5, 0.0],
-                [1.0, 0.0, 0.5],
-                [0.0, 0.5, 0.5],
-                [0.5, 0.0, 1.0],
-                [1.0, 0.2, 0.2],
-                [0.7, 0.7, 0.0],
-                [0.2, 0.2, 0.7],
-                [0.0, 0.7, 0.7],
-                [0.7, 0.0, 0.7],
-                [0.7, 0.5, 0.2],
-                [0.4, 0.7, 0.2],
-                [0.8, 0.2, 0.8],
-                [0.8, 0.8, 0.2],
-                [0.2, 0.8, 0.8],
-                [0.8, 0.2, 0.2],
-                [0.5, 0.2, 0.7],
-                [0.7, 0.5, 0.7],
-                [0.5, 0.7, 0.2],
-                [0.2, 0.7, 0.5],
-                [0.7, 0.2, 0.5],
-                [1.0, 0.0, 0.0],
-                [0.0, 1.0, 0.0],
-                [0.0, 0.0, 1.0],
-                [0.5, 0.5, 1.0],
-                [0.0, 0.5, 1.0],
-                [1.0, 0.5, 1.0],
-                [1.0, 0.5, 0.0],
-                [0.2, 0.5, 0.2],
-                [0.2, 0.8, 0.4],
-                [1.0, 0.0, 0.5],
-                [0.5, 0.0, 0.0],
-                [0.0, 0.5, 0.0],
-                [1.0, 0.0, 0.5],
-                [0.0, 0.5, 0.5],
-                [0.5, 0.0, 1.0],
-                [1.0, 0.2, 0.2],
-                [0.7, 0.7, 0.0],
-                [0.2, 0.2, 0.7],
-                [0.0, 0.7, 0.7],
-                [0.7, 0.0, 0.7],
-                [0.7, 0.5, 0.2],
-                [0.4, 0.7, 0.2],
-                [0.8, 0.2, 0.8],
-                [0.8, 0.8, 0.2],
-                [0.2, 0.8, 0.8],
-                [0.8, 0.2, 0.2],
-                [0.5, 0.2, 0.7],
-                [0.7, 0.5, 0.7],
-                [0.5, 0.7, 0.2],
-                [0.2, 0.7, 0.5],
-                [0.7, 0.2, 0.5],
-                [1.0, 0.0, 0.0],
-                [0.0, 1.0, 0.0],
-                [0.0, 0.0, 1.0],
-                [0.5, 0.5, 1.0],
-                [0.0, 0.5, 1.0],
-                [1.0, 0.5, 1.0],
-                [1.0, 0.5, 0.0],
-                [0.2, 0.5, 0.2],
-                [0.2, 0.8, 0.4],
-                [1.0, 0.0, 0.5],
-                [0.5, 0.0, 0.0],
-                [0.0, 0.5, 0.0],
-                [1.0, 0.0, 0.5],
-                [0.0, 0.5, 0.5],
-                [0.5, 0.0, 1.0],
-                [1.0, 0.2, 0.2],
-                [0.7, 0.7, 0.0],
-                [0.2, 0.2, 0.7],
-                [0.0, 0.7, 0.7],
-                [0.7, 0.0, 0.7],
-                [0.7, 0.5, 0.2],
-                [0.4, 0.7, 0.2],
-                [0.8, 0.2, 0.8],
-                [0.8, 0.8, 0.2],
-                [0.2, 0.8, 0.8],
-                [0.8, 0.2, 0.2],
-                [0.5, 0.2, 0.7],
-                [0.7, 0.5, 0.7],
-                [0.5, 0.7, 0.2],
-                [0.2, 0.7, 0.5],
-                [0.7, 0.2, 0.5]
-            ]
-            for seg_info in all_individual_segmentations:
-                if seg_info["label_id"] not in unique_labels_for_roi:
-                    continue
-
-                current_prompt_spec = None
-                for prompt_spec_item in task_data.get("segmentation_prompts", []):
-                    if prompt_spec_item["target_output_label"] == seg_info["label_id"]:
-                        current_prompt_spec = prompt_spec_item
-                        break
-
-
-                roi_center_physical = None
-
-                if current_prompt_spec:
-                    physical_center_from_rust = current_prompt_spec.get("physical_center_of_box")
-                    if physical_center_from_rust and isinstance(physical_center_from_rust, list) and len(physical_center_from_rust) == 3:
-                        roi_center_physical = physical_center_from_rust
-                    else:
-                        points_for_center_voxel = []
-                        positive_points_voxel = current_prompt_spec.get("positive_points", [])
-                        if positive_points_voxel:
-                            points_for_center_voxel = positive_points_voxel
-                        elif not points_for_center_voxel:
-                            negative_points_voxel = current_prompt_spec.get("negative_points", [])
-                            if negative_points_voxel:
-                                points_for_center_voxel = negative_points_voxel
-                        
-                        if points_for_center_voxel:
-                            # Use the first point from the chosen list
-                            first_voxel_point = np.array(points_for_center_voxel[0] + [1]) # Homogeneous voxel coords
-                            try:
-                                if nib and np: # Ensure nibabel and numpy are available
-                                    img_affine = nib.load(task_data["input_file"]).affine
-                                    physical_coords = img_affine @ first_voxel_point
-                                    roi_center_physical = physical_coords[:3].tolist()
-                                else:
-                                    logger.warning("nibabel or numpy not available for physical coordinate conversion. ROICenter will be voxel.")
-                                    roi_center_physical = points_for_center_voxel[0] # Fallback to voxel
-                            except Exception as e:
-                                logger.warning(f"Could not convert voxel center to physical for ROI {seg_info['label_id']}: {e}")
-                                roi_center_physical = points_for_center_voxel[0] # Fallback to voxel if conversion fails
-
-                color_idx = unique_labels_for_roi.index(seg_info["label_id"])
-                rois_list.append({
-                    "ROIIndex": seg_info["label_id"], "ROIName": seg_info["display_name"],
-                    "ROIColor": roi_colors[color_idx % len(roi_colors)], "visible": True, 
-                    "ROICenter": roi_center_physical
+            rois_for_current_task = []
+            for detail in all_current_task_prompt_details:
+                prompt_spec = detail['prompt_spec']
+                target_label = prompt_spec["target_output_label"]
+                display_name = prompt_spec.get("display_name", f"Label {target_label}")
+                rois_for_current_task.append({
+                    "ROIIndex": target_label,
+                    "ROIName": display_name,
+                    "ROICenter": detail['physical_center_from_task'], 
+                    "visible": True 
                 })
-            with open(vista_roi_path, 'w') as f_roi:
-                json.dump({"rois": rois_list}, f_roi, indent=2)
-            logger.info(f"Saved VISTA ROI info to: {vista_roi_path}")
-            return True, "Point segmentation completed successfully."
+            
+            roi_colors = [
+                [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0], [0.5, 0.5, 1.0],
+                [0.0, 0.5, 1.0], [1.0, 0.5, 1.0], [1.0, 0.5, 0.0], [0.2, 0.5, 0.2],
+                [0.2, 0.8, 0.4], [1.0, 0.0, 0.5], [0.5, 0.0, 0.0], [0.0, 0.5, 0.0],
+                [1.0, 0.0, 0.5], [0.0, 0.5, 0.5], [0.5, 0.0, 1.0], [1.0, 0.2, 0.2],
+                [0.7, 0.7, 0.0], [0.2, 0.2, 0.7], [0.0, 0.7, 0.7], [0.7, 0.0, 0.7],
+                [0.7, 0.5, 0.2], [0.4, 0.7, 0.2], [0.8, 0.2, 0.8], [0.8, 0.8, 0.2],
+                [0.2, 0.8, 0.8], [0.8, 0.2, 0.2], [0.5, 0.2, 0.7], [0.7, 0.5, 0.7],
+                [0.5, 0.7, 0.2], [0.2, 0.7, 0.5], [0.7, 0.2, 0.5]
+            ]
+            
+            num_prompts_in_task = len(task_data.get("segmentation_prompts", []))
+            final_json_content_rois = []
 
+            if num_prompts_in_task == 1:
+                final_json_content_rois = list(rois_for_current_task) 
+                logger.info(f"Single prompt task: {vista_roi_path} will be overwritten with this prompt's ROI info.")
+            else: 
+                final_json_content_rois = list(rois_for_current_task) 
+                current_task_labels_set = {roi['ROIIndex'] for roi in rois_for_current_task}
+                
+                for label_idx, existing_roi_entry in existing_rois_map.items():
+                    if label_idx not in current_task_labels_set:
+                        final_json_content_rois.append(existing_roi_entry)
+                logger.info(f"Multiple/zero prompts task: Merged/formed {len(final_json_content_rois)} ROIs for {vista_roi_path}.")
+
+            # Assign colors based on the final list of ROIs
+            # Sort by ROIIndex to ensure consistent color assignment if order changes but set of labels is same
+            final_json_content_rois.sort(key=lambda r: r['ROIIndex']) 
+            unique_labels_in_final_json = [r['ROIIndex'] for r in final_json_content_rois] # Already unique and sorted
+
+            for roi_entry in final_json_content_rois:
+                try:
+                    color_idx = unique_labels_in_final_json.index(roi_entry['ROIIndex'])
+                    roi_entry['ROIColor'] = roi_colors[color_idx % len(roi_colors)]
+                except ValueError: # Should not happen if logic is correct
+                    logger.warning(f"Could not find ROIIndex {roi_entry['ROIIndex']} in unique_labels_in_final_json for color assignment. Using default.")
+                    roi_entry['ROIColor'] = [0.5, 0.5, 0.5] # Default gray
+
+
+            with open(vista_roi_path, 'w') as f_final_roi:
+                json.dump({"rois": final_json_content_rois}, f_final_roi, indent=2)
+            logger.info(f"Saved/Updated final VISTA ROI info to: {vista_roi_path}")
+
+            return True, "Point segmentation completed successfully."
+        
         else: # Full segmentation
             logger.info(f"Running full segmentation with {len(EVERYTHING_PROMPT)} labels")
             result = infer_obj.infer(
                 image_file=task_data["input_file"],
-                save_mask=True, # As per original logic
+                save_mask=True, 
                 label_prompt=EVERYTHING_PROMPT 
             )
-            # Similar to "point" mode, if `save_mask=True` is used, `infer` returns the tensor.
             if result is not None:
                 output_file = os.path.join(task_data["output_directory"], "ct_seg.nii.gz")
                 logger.info(f"Saving full segmentation to: {output_file}")
                 
-                result_np = result.cpu().numpy().astype(np.float32) # Or np.int16
+                result_np = result.cpu().numpy().astype(np.float32) 
                 nifti_img = nib.Nifti1Image(result_np[0], result.affine.cpu().numpy() if hasattr(result, 'affine') else np.eye(4))
                 nib.save(nifti_img, output_file)
                 
                 if os.path.exists(output_file):
                     logger.info(f"Full segmentation saved successfully")
-                    # No vista_roi.json for full segmentation by default in this service
                     return True, "Full segmentation completed successfully."
                 else:
                     return False, "Failed to save full segmentation."
@@ -514,8 +468,6 @@ def run_vista3d_task(task_data, config):
 
 def process_task_file(task_file_path_submitted, taskshistory_dir, config, active_task_paths, active_task_paths_lock):
     """Process a single task file."""
-    # task_file_path_submitted is the path that was added to active_task_paths
-    # We use this specific variable name to avoid confusion if 'task_file' is used locally.
     task_file = task_file_path_submitted 
     try:
         with open(task_file, 'r') as f:
@@ -523,14 +475,12 @@ def process_task_file(task_file_path_submitted, taskshistory_dir, config, active
         
         task_id = task_data.get("task_id", os.path.basename(task_file))
         logger.info(f"Processing Task ID: {task_id}, File: {task_file}")
-        # logger.info(f"Task Data: {json.dumps(task_data, indent=2)}") # More readable log
         
         valid, message = validate_task(task_data)
         if not valid:
             logger.error(f"Task validation failed for {task_id}: {message}")
             destination = os.path.join(taskshistory_dir, f"failed_validation_{os.path.basename(task_file)}")
             shutil.move(task_file, destination)
-            # Create a result file indicating validation failure
             result_data = {
                 "task_id": task_id, "processed_time": datetime.now().isoformat(),
                 "success": False, "message": f"Validation Failed: {message}"
@@ -543,16 +493,13 @@ def process_task_file(task_file_path_submitted, taskshistory_dir, config, active
         logger.info(f"Task {task_id} validated successfully. Type: {task_data['segmentation_type']}")
         success, result_message = run_vista3d_task(task_data, config)
         
-        # Define output paths for result file
         output_mask_path = os.path.join(task_data.get('output_directory', './'), "ct_seg.nii.gz")
         output_labels_path = os.path.join(task_data.get('output_directory', './'), "ct_seg.json")
         
-        # Check if output files actually exist if success is True
         if success:
-            if not os.path.exists(output_mask_path):
-                logger.warning(f"Segmentation reported success for task {task_id}, but output mask {output_mask_path} not found.")
-                # success = False # Optionally mark as failed if output is critical
-                # result_message += " (Output mask missing)"
+            if not os.path.exists(output_mask_path) and task_data["segmentation_type"] != "point": # For "full" seg, mask must exist
+                 logger.warning(f"Segmentation reported success for task {task_id} (type: {task_data['segmentation_type']}), but output mask {output_mask_path} not found.")
+            # For "point" type, mask might not be updated if no new segs, so existence isn't strictly a failure if success=True
             if task_data["segmentation_type"] == "point" and not os.path.exists(output_labels_path):
                  logger.warning(f"Segmentation reported success for task {task_id}, but ROI file {output_labels_path} not found for point-based type.")
 
@@ -563,7 +510,7 @@ def process_task_file(task_file_path_submitted, taskshistory_dir, config, active
             "success": success,
             "message": result_message,
             "output_mask": output_mask_path if os.path.exists(output_mask_path) else None,
-            "output_labels": output_labels_path if task_data["segmentation_type"] == "point" and os.path.exists(output_labels_path) else None
+            "output_labels": output_labels_path if os.path.exists(output_labels_path) else None # Always report if it exists
         }
         
         result_file_name = Path(task_file).stem + "_result.json"
@@ -592,7 +539,6 @@ def process_task_file(task_file_path_submitted, taskshistory_dir, config, active
         except Exception as move_err:
             logger.error(f"Could not move errored task file {task_file} to history: {move_err}")
 
-        # Create a result file indicating processing error
         result_data = {
             "task_id": task_data.get("task_id", task_id_fallback) if 'task_data' in locals() else task_id_fallback,
             "processed_time": datetime.now().isoformat(),
@@ -606,16 +552,10 @@ def process_task_file(task_file_path_submitted, taskshistory_dir, config, active
              logger.error(f"Could not write result file for errored task {task_file}: {res_err}")
         return False
     finally:
-        # This block ensures the task path is removed from the active set
-        # regardless of how process_task_file exits (success, validation fail, exception).
         with active_task_paths_lock:
             if task_file_path_submitted in active_task_paths:
                 active_task_paths.remove(task_file_path_submitted)
                 logger.info(f"Task {os.path.basename(task_file_path_submitted)} processing complete, removed from active set.")
-            # else:
-                # This case should ideally not happen if logic is correct,
-                # but can be useful for debugging if it does.
-                # logger.warning(f"Task {os.path.basename(task_file_path_submitted)} was not in active set upon completion attempt.")
 
 
 def monitor_tasks_folder(tasks_dir, taskshistory_dir, interval=5, config=None, max_concurrent_tasks=1):
@@ -632,7 +572,6 @@ def monitor_tasks_folder(tasks_dir, taskshistory_dir, interval=5, config=None, m
         try:
             while True:
                 try:
-                    # List all .tsk files. We will check against active_task_paths.
                     discovered_task_files = [
                         os.path.join(tasks_dir, f)
                         for f in os.listdir(tasks_dir)
@@ -641,27 +580,24 @@ def monitor_tasks_folder(tasks_dir, taskshistory_dir, interval=5, config=None, m
 
                     if discovered_task_files:
                         logger.debug(f"Discovered {len(discovered_task_files)} .tsk files. Checking against active set.")
-                        for task_path in sorted(discovered_task_files):
-                            if not os.path.exists(task_path): # Quick check if it disappeared since listdir
+                        for task_path in sorted(discovered_task_files): # sorted for deterministic processing order
+                            if not os.path.exists(task_path): 
                                 continue
 
                             with active_task_paths_lock:
                                 if task_path in active_task_paths:
                                     logger.debug(f"Task {os.path.basename(task_path)} is already active. Skipping.")
                                     continue
-                                # If not active, mark it as active by adding to the set
                                 active_task_paths.add(task_path)
                                 logger.info(f"Task {os.path.basename(task_path)} added to active set for submission.")
                             
-                            # Submit the task. The lock is released before submission.
                             try:
                                 logger.info(f"Submitting task {os.path.basename(task_path)} to executor.")
                                 executor.submit(process_task_file, task_path, taskshistory_dir, config, active_task_paths, active_task_paths_lock)
                             except Exception as e_submit:
                                 logger.error(f"Failed to submit task {os.path.basename(task_path)} to executor: {e_submit}")
-                                # Important: Remove from active set if submission failed
                                 with active_task_paths_lock:
-                                    if task_path in active_task_paths: # Should be
+                                    if task_path in active_task_paths: 
                                         active_task_paths.remove(task_path)
                                         logger.info(f"Removed {os.path.basename(task_path)} from active set due to submission failure.")
                     
@@ -669,12 +605,12 @@ def monitor_tasks_folder(tasks_dir, taskshistory_dir, interval=5, config=None, m
                 
                 except KeyboardInterrupt:
                     logger.info("Service stopping... waiting for tasks to complete.")
-                    break # Exit while loop, executor shutdown will be handled by 'with' statement
+                    break 
                 
                 except Exception as e:
                     logger.error(f"Critical error in monitoring loop: {str(e)}")
                     logger.error(traceback.format_exc())
-                    time.sleep(interval * 5) # Longer sleep on critical error
+                    time.sleep(interval * 5) 
         finally:
             logger.info("VISTA3D service shutting down executor.")
     logger.info("VISTA3D service monitor loop ended.")
@@ -701,10 +637,8 @@ def main():
     return 0
 
 if __name__ == "__main__":
-    # Ensure dependencies are checked early if critical
     if torch is None or np is None or nib is None:
         logger.warning("One or more core dependencies (PyTorch, NumPy, Nibabel) are missing. "
-                       "Service functionality will be limited, 'point' mode will fail validation.")
-        # sys.exit("Core dependencies missing. Please install PyTorch, NumPy, and Nibabel.") # Optionally exit
+                       "Service functionality will be limited, 'point' mode will fail validation if not all are present.")
     
     sys.exit(main())
