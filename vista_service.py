@@ -203,7 +203,7 @@ def _get_roi_center_physical(prompt_spec):
         else:
             logger.warning(f"Invalid data types in 'physical_center_of_box' for prompt targeting {prompt_spec.get('target_output_label', 'Unknown')}. Expected numbers.")
             return None
-    if physical_center is not None: # It exists but is not the expected format
+    if physical_center is not None:
          logger.warning(f"Malformed 'physical_center_of_box' for prompt targeting {prompt_spec.get('target_output_label', 'Unknown')}. Expected list of 3 numbers.")
     return None
 
@@ -320,48 +320,98 @@ def run_vista3d_task(task_data, config):
             else:
                 logger.info("No prompts require new segmentation processing.")
 
+            num_prompts_in_task = len(task_data.get("segmentation_prompts", []))
+
             # Mask Combination
             final_combined_mask_tensor = None
             final_mask_affine = None
             final_mask_shape_3d = None
-
-            if os.path.exists(output_mask_file):
-                try:
-                    existing_mask_nii = nib.load(output_mask_file)
-                    final_combined_mask_tensor = torch.from_numpy(existing_mask_nii.get_fdata().astype(np.int16))
-                    final_mask_affine = existing_mask_nii.affine
-                    final_mask_shape_3d = final_combined_mask_tensor.shape
-                    logger.info(f"Loaded existing mask {output_mask_file} for merging.")
-                except Exception as e:
-                    logger.warning(f"Could not load existing mask {output_mask_file}: {e}. Will try to create new if needed.")
-
-            if segmentation_results_new: 
-                if final_combined_mask_tensor is None: 
+ 
+            if num_prompts_in_task == 1:
+                logger.info("Single prompt task: Output will replace existing ct_seg.nii.gz.")
+                # For a single prompt task, we start with a new conceptual mask.
+                # Geometry is determined by new results, or by input/existing output if no new results.
+                if segmentation_results_new: # New segmentation available for the single prompt
                     if first_processed_mask_metadata:
+                        final_mask_affine = first_processed_mask_metadata['affine']
+                        raw_shape = first_processed_mask_metadata['shape']
+                        final_mask_shape_3d = raw_shape[1:] if len(raw_shape) == 4 and raw_shape[0] == 1 else raw_shape
+                        final_combined_mask_tensor = torch.zeros(final_mask_shape_3d, dtype=torch.int16)
+                        logger.info(f"Initialized new empty mask for single prompt task with shape {final_mask_shape_3d}.")
+                    else: # Should not happen if segmentation_results_new is populated
+                        logger.error("Single prompt produced results, but no metadata to establish mask geometry.")
+                        return False, "Failed to get mask geometry for single prompt result."
+                else: # No new segmentation for the single prompt (e.g., skipped or failed)
+                    # Create an empty mask with appropriate geometry.
+                    # Priority for geometry: existing output_mask_file, then input_file.
+                    geom_source_path = None
+                    geom_source_name = ""
+                    if os.path.exists(output_mask_file):
+                        geom_source_path = output_mask_file
+                        geom_source_name = "existing output mask"
+                    elif os.path.exists(task_data["input_file"]):
+                        geom_source_path = task_data["input_file"]
+                        geom_source_name = "input file"
+                    
+                    if geom_source_path:
+                        try:
+                            geom_nii = nib.load(geom_source_path)
+                            final_mask_affine = geom_nii.affine
+                            final_mask_shape_3d = geom_nii.header.get_data_shape()[:3] # Ensure 3D
+                            final_combined_mask_tensor = torch.zeros(final_mask_shape_3d, dtype=torch.int16)
+                            logger.info(f"Initialized empty mask for single prompt (no new seg) using geometry from {geom_source_name} ({geom_source_path}).")
+                        except Exception as e:
+                            logger.warning(f"Failed to get geometry from {geom_source_name} ({geom_source_path}) for empty single prompt mask: {e}")
+                    else:
+                        logger.warning("Single prompt task with no new segmentation: Cannot determine geometry for empty mask (no existing output, input invalid/missing).")
+
+            else: # num_prompts_in_task > 1 or num_prompts_in_task == 0 (merge logic)
+                logger.info("Multiple/zero prompts task: Will merge with existing ct_seg.nii.gz if present.")
+                if os.path.exists(output_mask_file):
+                    try:
+                        existing_mask_nii = nib.load(output_mask_file)
+                        final_combined_mask_tensor = torch.from_numpy(existing_mask_nii.get_fdata().astype(np.int16))
+                        final_mask_affine = existing_mask_nii.affine
+                        final_mask_shape_3d = final_combined_mask_tensor.shape # Should be 3D
+                        logger.info(f"Loaded existing mask {output_mask_file} for merging.")
+                    except Exception as e:
+                        logger.warning(f"Could not load existing mask {output_mask_file}: {e}. Will try to create new if needed.")
+                
+                # If still no mask tensor and new results exist, initialize from new results' metadata
+                # This happens if there was no existing mask or it failed to load.
+                if final_combined_mask_tensor is None and segmentation_results_new:
+                    if first_processed_mask_metadata:
+                        final_mask_affine = first_processed_mask_metadata['affine']
                         raw_shape = first_processed_mask_metadata['shape'] 
                         final_mask_shape_3d = raw_shape[1:] if len(raw_shape) == 4 and raw_shape[0] == 1 else raw_shape
                         final_combined_mask_tensor = torch.zeros(final_mask_shape_3d, dtype=torch.int16)
-                        final_mask_affine = first_processed_mask_metadata['affine']
-                        logger.info(f"Initialized new empty mask with shape {final_mask_shape_3d}.")
-                    else:
-                        logger.error("New segmentations produced, but no metadata to create a base mask and no existing mask found.")
-                        return False, "Failed to establish mask geometry for new segmentations."
+                        logger.info(f"Initialized new empty mask with shape {final_mask_shape_3d} for merging.")
+                    else: # New results, but no metadata (should not happen if prompts_to_process was non-empty)
+                        logger.error("Multiple/zero prompts task with new segmentations, but no metadata to create a base mask and no existing mask.")
+                        return False, "Failed to establish mask geometry for new segmentations (merge case)."
+ 
+            # If new segmentations were produced and a mask tensor (new or loaded) is ready,
+            # process new results into the final_combined_mask_tensor.
+            if segmentation_results_new and final_combined_mask_tensor is not None:
+                for seg_res in segmentation_results_new:
+                    label_id = seg_res["label_id"]
+                    mask_tensor = seg_res["mask_tensor"] # This is [1, H, W, D] or similar
+                    
+                    squeezed_mask = mask_tensor.squeeze(0) # Should become [H, W, D]
+                    if squeezed_mask.shape != final_mask_shape_3d:
+                        logger.warning(f"Shape mismatch for label {label_id}: mask {squeezed_mask.shape}, base {final_mask_shape_3d}. Skipping for this label.")
+                        continue
 
-                if final_combined_mask_tensor is not None:
-                    for seg_res in segmentation_results_new:
-                        label_id = seg_res["label_id"]
-                        mask_tensor = seg_res["mask_tensor"] 
-                        
-                        squeezed_mask = mask_tensor.squeeze(0) 
-                        if squeezed_mask.shape != final_mask_shape_3d:
-                            logger.warning(f"Shape mismatch for label {label_id}: mask {squeezed_mask.shape}, base {final_mask_shape_3d}. Skipping merge for this label.")
-                            continue
+                    binary_class_mask = (squeezed_mask > 0.5).long()
+                    
+                    # Clear existing voxels for this label_id (if any, relevant for multi-prompt merge)
+                    # and then set the new segmentation.
+                    # For single prompt, final_combined_mask_tensor starts as zeros, so this just adds the new seg.
+                    final_combined_mask_tensor[final_combined_mask_tensor == label_id] = 0
+                    final_combined_mask_tensor[binary_class_mask == 1] = label_id
+                    logger.info(f"Processed segmentation for label {label_id} into final mask.")
 
-                        binary_class_mask = (squeezed_mask > 0.5).long()
-                        
-                        final_combined_mask_tensor[final_combined_mask_tensor == label_id] = 0
-                        final_combined_mask_tensor[binary_class_mask == 1] = label_id
-                        logger.info(f"Merged segmentation for label {label_id} into combined mask.")
+
             
             if final_combined_mask_tensor is not None and final_mask_affine is not None:
                 nifti_img = nib.Nifti1Image(final_combined_mask_tensor.numpy().astype(np.int16), final_mask_affine)
@@ -491,9 +541,8 @@ def process_task_file(task_file_path_submitted, taskshistory_dir, config, active
         output_labels_path = os.path.join(task_data.get('output_directory', './'), "ct_seg.json")
         
         if success:
-            if not os.path.exists(output_mask_path) and task_data["segmentation_type"] != "point": # For "full" seg, mask must exist
+            if not os.path.exists(output_mask_path) and task_data["segmentation_type"] != "point":
                  logger.warning(f"Segmentation reported success for task {task_id} (type: {task_data['segmentation_type']}), but output mask {output_mask_path} not found.")
-            # For "point" type, mask might not be updated if no new segs, so existence isn't strictly a failure if success=True
             if task_data["segmentation_type"] == "point" and not os.path.exists(output_labels_path):
                  logger.warning(f"Segmentation reported success for task {task_id}, but ROI file {output_labels_path} not found for point-based type.")
 
