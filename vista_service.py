@@ -329,21 +329,17 @@ def run_vista3d_task(task_data, config):
  
             if num_prompts_in_task == 1:
                 logger.info("Single prompt task: Output will replace existing ct_seg.nii.gz.")
-                # For a single prompt task, we start with a new conceptual mask.
-                # Geometry is determined by new results, or by input/existing output if no new results.
-                if segmentation_results_new: # New segmentation available for the single prompt
+                if segmentation_results_new:
                     if first_processed_mask_metadata:
                         final_mask_affine = first_processed_mask_metadata['affine']
                         raw_shape = first_processed_mask_metadata['shape']
                         final_mask_shape_3d = raw_shape[1:] if len(raw_shape) == 4 and raw_shape[0] == 1 else raw_shape
                         final_combined_mask_tensor = torch.zeros(final_mask_shape_3d, dtype=torch.int16)
                         logger.info(f"Initialized new empty mask for single prompt task with shape {final_mask_shape_3d}.")
-                    else: # Should not happen if segmentation_results_new is populated
+                    else:
                         logger.error("Single prompt produced results, but no metadata to establish mask geometry.")
                         return False, "Failed to get mask geometry for single prompt result."
-                else: # No new segmentation for the single prompt (e.g., skipped or failed)
-                    # Create an empty mask with appropriate geometry.
-                    # Priority for geometry: existing output_mask_file, then input_file.
+                else:
                     geom_source_path = None
                     geom_source_name = ""
                     if os.path.exists(output_mask_file):
@@ -365,7 +361,7 @@ def run_vista3d_task(task_data, config):
                     else:
                         logger.warning("Single prompt task with no new segmentation: Cannot determine geometry for empty mask (no existing output, input invalid/missing).")
 
-            else: # num_prompts_in_task > 1 or num_prompts_in_task == 0 (merge logic)
+            else:
                 logger.info("Multiple/zero prompts task: Will merge with existing ct_seg.nii.gz if present.")
                 if os.path.exists(output_mask_file):
                     try:
@@ -377,8 +373,6 @@ def run_vista3d_task(task_data, config):
                     except Exception as e:
                         logger.warning(f"Could not load existing mask {output_mask_file}: {e}. Will try to create new if needed.")
                 
-                # If still no mask tensor and new results exist, initialize from new results' metadata
-                # This happens if there was no existing mask or it failed to load.
                 if final_combined_mask_tensor is None and segmentation_results_new:
                     if first_processed_mask_metadata:
                         final_mask_affine = first_processed_mask_metadata['affine']
@@ -386,7 +380,7 @@ def run_vista3d_task(task_data, config):
                         final_mask_shape_3d = raw_shape[1:] if len(raw_shape) == 4 and raw_shape[0] == 1 else raw_shape
                         final_combined_mask_tensor = torch.zeros(final_mask_shape_3d, dtype=torch.int16)
                         logger.info(f"Initialized new empty mask with shape {final_mask_shape_3d} for merging.")
-                    else: # New results, but no metadata (should not happen if prompts_to_process was non-empty)
+                    else:
                         logger.error("Multiple/zero prompts task with new segmentations, but no metadata to create a base mask and no existing mask.")
                         return False, "Failed to establish mask geometry for new segmentations (merge case)."
  
@@ -404,9 +398,6 @@ def run_vista3d_task(task_data, config):
 
                     binary_class_mask = (squeezed_mask > 0.5).long()
                     
-                    # Clear existing voxels for this label_id (if any, relevant for multi-prompt merge)
-                    # and then set the new segmentation.
-                    # For single prompt, final_combined_mask_tensor starts as zeros, so this just adds the new seg.
                     final_combined_mask_tensor[final_combined_mask_tensor == label_id] = 0
                     final_combined_mask_tensor[binary_class_mask == 1] = label_id
                     logger.info(f"Processed segmentation for label {label_id} into final mask.")
@@ -424,8 +415,6 @@ def run_vista3d_task(task_data, config):
             else:
                 logger.info("No segmentation mask to save (e.g. no new results and no existing mask, or geometry issue).")
 
-
-            # Generate ct_seg.json
             rois_for_current_task = []
             for detail in all_current_task_prompt_details:
                 prompt_spec = detail['prompt_spec']
