@@ -1,0 +1,3 @@
+@echo off
+echo Starting VISTA3D Service...
+"C:\Users\Albert\VISTA\vista3d_package\vista3d.exe" "C:\Users\Albert\VISTA\vista3d_package\vista3d.exe" service

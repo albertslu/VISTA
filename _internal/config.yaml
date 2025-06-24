@@ -1,0 +1,21 @@
+# VISTA3D Service Configuration
+
+# Service settings
+service:
+  base_directory: "./vista_service"  # Base directory for service files
+  tasks_directory: "tasks"           # Subdirectory for task files
+  processed_directory: "processed"   # Subdirectory for processed tasks
+  failed_directory: "failed"         # Subdirectory for failed tasks
+  check_interval: 3                  # Interval in seconds to check for new tasks
+  log_file: "vista_service.log"      # Log file name
+
+# VISTA3D settings
+vista3d:
+  config_file: "./vista3d/configs/infer.yaml"  # Path to VISTA3D config
+  device: "auto"                               # "auto", "cuda:0", "cpu", etc.
+  memory_efficient: true                       # Use memory-efficient mode
+
+# Output settings
+output:
+  default_directory: "./output"      # Default output directory if not specified in task
+  save_format: "nii.gz"              # Output file format 

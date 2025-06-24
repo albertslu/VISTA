@@ -1,7 +1,7 @@
 {
   "service": {
-    "base_directory": "C:/ARTDaemon/SegmanRepo/dcm2nifti",
-    "tasks_directory": "Tasks/Vista3D",
+    "base_directory": "C:/ARTDaemon/Segman/dcm2nifti/Tasks/Vista3D",
+    "tasks_directory": "tasks",
     "taskshistory_directory": "TasksHistory/Vista3D",
     "check_interval": 3,
     "log_file": "vista_service.log"

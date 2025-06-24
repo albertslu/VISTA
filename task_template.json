@@ -1,9 +1,0 @@
-{
-    "task_id": "liver_segmentation_001",
-    "input_file": "C:/Users/Albert/Totalsegmentator_dataset_v201/s0031/ct.nii.gz",
-    "output_directory": "C:/Users/Albert/output/liver_seg_001",
-    "segmentation_type": "point",
-    "point_coordinates": [175, 136, 141],
-    "label": 1,
-    "description": "Liver segmentation using point-based approach"
-}
