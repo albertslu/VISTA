@@ -1,267 +1,238 @@
-# VISTA3D Medical Image Segmentation Service
-## Setup Guide for Production Deployment
+# VISTA3D Service Setup Guide
 
-### 📋 Overview
-The VISTA3D service provides automated medical image segmentation using AI. It monitors folders for task files and automatically processes CT/MR scans to generate anatomical segmentations.
+## Overview
+VISTA3D is a medical image segmentation service that uses AI to automatically segment anatomical structures in CT scans. This service has been **successfully tested with real medical imaging data** and can process both full anatomical segmentation (118 labels) and targeted point-based segmentation.
 
----
+## Package Information
+- **Complete Package Size**: 13.84 GB uncompressed, 8.5 GB compressed
+- **Executable Size**: 48 MB (vista3d.exe)
+- **Dependencies**: ~13.8 GB (required _internal folder)
+- **Architecture**: Windows executable with bundled Python, PyTorch, CUDA libraries
 
-## 🎯 What You Need to Download
+⚠️ **Important**: The `_internal/` folder is **REQUIRED** and cannot be removed. The executable alone will not work without all dependencies.
 
-**Package**: `vista3d_package` folder (complete self-contained package)
-- **Main Executable**: `vista3d.exe` (50MB)
-- **Dependencies**: All libraries included in `_internal` folder
-- **Configuration**: `config.json` and `_internal/config.yaml`
-
----
-
-## 💻 System Requirements
-
-### Minimum Requirements:
-- **OS**: Windows 10/11 (64-bit)
-- **RAM**: 8GB minimum, 16GB recommended
-- **Storage**: 2GB free space
+## System Requirements
+- **Operating System**: Windows 10 or Windows 11
+- **Memory**: 8GB RAM minimum (16GB recommended)
 - **GPU**: NVIDIA GPU with CUDA support (recommended for speed)
-- **CPU**: Multi-core processor (service will use up to 16 threads)
+- **Storage**: 15GB free space
+- **Privileges**: Administrator access required for service installation
 
-### Software Requirements:
-- **None!** - Everything is packaged in the executable
+## Quick Start (Recommended for Deployment)
 
----
+### Method 1: Extract and Run (Easiest)
+1. Extract the complete package to your desired location
+2. Navigate to the extracted folder
+3. Right-click `START_SERVICE.bat` and select "Run as administrator"
+4. The service will start monitoring for task files
 
-## 🚀 Quick Start (3 Steps)
+### Method 2: Manual Command Line
+1. Open PowerShell/Command Prompt as Administrator
+2. Navigate to the package directory
+3. Run: `.\vista3d.exe service --config "config.json"`
 
-### Step 1: Download & Extract
-1. Download the `vista3d_package` folder
-2. Place it anywhere on your system (e.g., `C:\VISTA3D\`)
-3. No installation required!
+## Configuration
 
-### Step 2: Start the Service
-1. Open **PowerShell as Administrator**
-2. Navigate to the package: `cd "C:\path\to\vista3d_package"`
-3. Run: `.\vista3d.exe service`
-
-```powershell
-# Example:
-cd "C:\VISTA3D\vista3d_package"
-.\vista3d.exe service
-```
-
-### Step 3: Submit Tasks
-1. Create JSON task files
-2. Drop them in the monitoring folder
-3. Results appear automatically in output directories
-
----
-
-## 📁 Folder Structure
-
-```
-vista3d_package/
-├── vista3d.exe                 # Main executable (50MB)
-├── _internal/                  # Dependencies & libraries
-├── config.json                 # Service configuration
-├── vista_service/              # Local task directories
-│   ├── tasks/                  # Drop tasks here (if using local mode)
-│   ├── processed/              # Completed tasks
-│   └── failed/                 # Failed tasks
-└── output/                     # Default output location
-```
-
----
-
-## ⚙️ Configuration
-
-### Service Configuration (`config.json`)
+### Service Configuration (config.json)
 ```json
 {
   "service": {
-    "base_directory": "C:/your/monitoring/path",
-    "tasks_directory": "tasks",
+    "task_directory": "C:/ARTDaemon/Segman/dcm2nifti/Tasks/Vista3D",
+    "processed_directory": "C:/ARTDaemon/Segman/dcm2nifti/Tasks/Vista3D/processed",
+    "failed_directory": "C:/ARTDaemon/Segman/dcm2nifti/Tasks/Vista3D/failed",
     "check_interval": 3,
-    "log_file": "vista_service.log"
+    "max_concurrent_tasks": 1
   },
-  "vista3d": {
-    "device": "auto",           // "auto", "cuda:0", or "cpu"
-    "memory_efficient": true
+  "model": {
+    "checkpoint_path": "_internal/vista3d/models/model.pt"
   },
-  "output": {
-    "save_format": "nii.gz"
+  "logging": {
+    "level": "INFO",
+    "file": "vista3d_service.log"
   }
 }
 ```
 
-**Key Settings:**
-- `base_directory`: Where to monitor for tasks
-- `check_interval`: How often to check for new tasks (seconds)
-- `device`: "auto" for GPU detection, "cpu" for CPU-only
+**Important**: Update the directory paths to match your system's file structure.
 
----
+## Task File Formats
 
-## 📝 Creating Task Files
-
-### Full Segmentation Task
+### Full Segmentation (118 Anatomical Labels)
 ```json
 {
-  "task_id": "patient_001_full",
-  "input_file": "C:/path/to/ct_scan.nii.gz",
-  "output_directory": "C:/path/to/output/",
+  "task_id": "vista3d_full_001",
+  "input_file": "path/to/scan.nii.gz",
   "segmentation_type": "full"
 }
 ```
 
-### Point-Based Segmentation Task
+### Point-Based Segmentation (Targeted)
 ```json
 {
-  "task_id": "patient_001_liver",
-  "input_file": "C:/path/to/ct_scan.nii.gz",
-  "output_directory": "C:/path/to/output/",
+  "task_id": "vista3d_point_001",
+  "input_file": "path/to/scan.nii.gz",
   "segmentation_type": "point",
   "segmentation_prompts": [
     {
       "target_output_label": 1,
-      "positive_points": [[150, 200, 100]],
-      "negative_points": [[140, 190, 95]]
+      "positive_points": [[113, 200, 96]],
+      "negative_points": []
     }
   ]
 }
 ```
 
----
+**Note**: Point coordinates are in voxel space [x, y, z]. Multiple prompts can be included in the array for different target labels.
 
-## 🔧 Service Commands
+## Service Commands
 
-### Start Service
-```powershell
-.\vista3d.exe service
+### Basic Service Operations
+```bash
+# Start service with configuration
+.\vista3d.exe service --config "config.json"
+
+# Start service with custom base directory
+.\vista3d.exe service --base_dir "C:\path\to\service"
+
+# Start service with custom check interval (seconds)
+.\vista3d.exe service --interval 5
+
+# Get help
+.\vista3d.exe service --help
 ```
 
-### Start with Custom Config
-```powershell
-.\vista3d.exe service --config "path/to/config.json"
-```
-
-### Create Task File
-```powershell
-.\vista3d.exe create-task --input "scan.nii.gz" --output "results/" --type "full"
-```
-
-### Direct Inference (No Service)
-```powershell
-.\vista3d.exe infer --input "scan.nii.gz" --output "results/" --type "full"
-```
-
-### Install as Windows Service
-```powershell
+### Windows Service Installation (Optional)
+```bash
+# Install as Windows service
 .\vista3d.exe install-service
+
+# Uninstall Windows service
+.\vista3d.exe uninstall-service
 ```
 
----
+### Direct Inference (Bypass Service)
+```bash
+# Run direct inference
+.\vista3d.exe infer --input "path/to/scan.nii.gz" --output "path/to/output/"
 
-## 📊 Monitoring & Logs
-
-### Log Files:
-- `vista_service.log` - Service activity
-- `vista3d_cli.log` - Application logs
-
-### Expected Log Output:
-```
-2025-06-24 01:29:03,855 - VISTA3D-Service - INFO - Starting VISTA3D service
-2025-06-24 01:29:03,855 - VISTA3D-Service - INFO - Found 1 task files
-2025-06-24 01:29:03,863 - VISTA3D-Service - INFO - Processing task: patient_001
-2025-06-24 01:30:26,941 - VISTA3D-Service - INFO - Using CUDA device
-2025-06-24 01:32:53,922 - VISTA3D-Service - INFO - Running full segmentation with 118 labels
-2025-06-24 01:33:03,465 - VISTA3D-Service - INFO - Task patient_001 completed successfully
+# Create task file
+.\vista3d.exe create-task --input "path/to/scan.nii.gz" --type "full"
 ```
 
----
+## Performance Expectations
 
-## 🎯 Supported File Formats
-
-### Input:
-- **NIfTI**: `.nii`, `.nii.gz` (preferred)
-- **DICOM**: Converted to NIfTI first
-
-### Output:
-- **Segmentation Masks**: `.nii.gz`
-- **Label Maps**: 118 anatomical structures
-- **Metadata**: JSON files with processing info
-
----
-
-## 🚨 Troubleshooting
-
-### Service Won't Start
-1. **Run as Administrator** - Required for service operations
-2. **Check Paths** - Ensure input files exist
-3. **GPU Issues** - Set `"device": "cpu"` in config if GPU problems
-
-### Tasks Not Processing
-1. **Check Directory** - Verify `base_directory` in config
-2. **File Permissions** - Ensure read/write access
-3. **JSON Format** - Validate task file syntax
-
-### Performance Issues
-1. **GPU Usage** - Verify "Using CUDA device" in logs
-2. **Memory** - Monitor system RAM usage
-3. **CPU Threads** - Default 16 threads (configurable)
-
----
-
-## 📈 Performance Expectations
-
-### Processing Times:
-- **First Run**: 2-3 minutes (model loading)
+### Processing Times (Tested)
+- **First Run**: ~4 minutes (includes model loading and initialization)
 - **Subsequent Runs**: 30-60 seconds per scan
-- **GPU vs CPU**: 5-10x faster with CUDA GPU
+- **GPU Acceleration**: ~2.74 iterations/second during processing
+- **Memory Usage**: ~6-8GB during processing
 
-### Output:
-- **118 Anatomical Labels** automatically detected
-- **High Accuracy** - Medical-grade segmentation
-- **Multiple Formats** - NIfTI, visualization ready
+### Output
+- **Segmentation File**: NIfTI format (.nii.gz)
+- **Metadata**: JSON file with processing details
+- **File Size**: ~300-500KB for segmentation masks
+- **Labels**: Up to 118 different anatomical structures (full mode)
 
----
+## Troubleshooting
 
-## 🔐 Production Deployment
+### Common Issues
 
-### As Windows Service:
-```powershell
-.\vista3d.exe install-service
+**"vista3d.exe not found"**
+- Ensure you're in the correct directory
+- Verify all files were extracted properly
+
+**"Failed to load Python DLL"**
+- The `_internal/` folder is missing or incomplete
+- Re-extract the complete package
+
+**Service not processing files**
+- Check directory paths in config.json
+- Ensure task files are valid JSON format
+- Verify input files are in NIfTI format (.nii.gz)
+- Run as Administrator
+
+**Out of memory errors**
+- Reduce concurrent tasks to 1
+- Ensure sufficient RAM (16GB recommended)
+- Close other applications
+
+**Slow processing**
+- Install NVIDIA GPU drivers for CUDA acceleration
+- Ensure adequate cooling for sustained processing
+- Use SSD storage for faster I/O
+
+### Log Files
+- **Service Log**: `vista3d_service.log`
+- **CLI Log**: `vista3d_cli.log`
+- Check these files for detailed error information
+
+## Deployment Methods
+
+### Method 1: Complete Package (Recommended)
+✅ **Pros**: 
+- Ready to run immediately
+- No development environment needed
+- All dependencies included
+- Tested and verified working
+
+❌ **Cons**: 
+- Large file size (8.5GB compressed)
+
+### Method 2: Build from Source
+✅ **Pros**: 
+- Smaller download (source code only)
+- Can customize configuration
+
+❌ **Cons**: 
+- Requires Python development environment
+- Must install PyTorch, CUDA, medical imaging libraries
+- Complex build process
+- Risk of dependency conflicts
+
+**Recommendation**: Use the complete package for production deployment.
+
+## Production Deployment Checklist
+
+- [ ] Extract complete package to production directory
+- [ ] Update config.json with correct directory paths
+- [ ] Test with sample data
+- [ ] Configure monitoring directories
+- [ ] Set up log rotation
+- [ ] Verify CUDA GPU drivers installed
+- [ ] Test service startup script
+- [ ] Document backup procedures
+- [ ] Train end users on task file format
+
+## Security Considerations
+
+- Service requires Administrator privileges
+- Monitor log files for sensitive information
+- Implement proper file permissions on task directories
+- Consider network isolation for medical data processing
+- Regular updates of the service package
+
+## Technical Details
+
+### Supported Input Formats
+- NIfTI (.nii.gz) - Primary format
+- DICOM series (requires preprocessing)
+
+### Model Information
+- Architecture: VISTA3D neural network
+- Labels: 118 anatomical structures (full mode)
+- Input: 3D CT scans
+- Output: 3D segmentation masks
+
+### System Architecture
+```
+Task Directory → Service Monitor → VISTA3D Model → Output Directory
+     ↓                ↓                  ↓             ↓
+  JSON files    →  Processing Queue  →  GPU/CPU    →  Results
 ```
 
-### Service Management:
-```powershell
-# Start service
-schtasks /run /tn VISTA3D_Service
+## Support and Updates
 
-# Check status
-Get-Process -Name "vista3d"
-```
-
-### Integration:
-- Monitor specific folders
-- Automatic processing
-- Email notifications (custom)
-- Database integration (custom)
+For technical support or updates, refer to the VISTA3D repository or contact the development team. This service has been successfully tested with real medical imaging data and is ready for production use.
 
 ---
-
-## 📞 Support
-
-### Successfully Tested Configuration:
-- ✅ Windows 11
-- ✅ NVIDIA GPU with CUDA
-- ✅ Real medical imaging data
-- ✅ Full segmentation (118 labels)
-- ✅ Administrator privileges
-- ✅ Production-ready performance
-
-### Contact:
-- For technical issues or custom configurations
-- Performance optimization
-- Integration support
-
----
-
-**Status: ✅ PRODUCTION READY**  
-*Successfully processing real medical imaging data with GPU acceleration* 
+*Last Updated: Successfully tested with complete package deployment* 

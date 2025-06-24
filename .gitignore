@@ -171,3 +171,13 @@ test_output/
 .vscode/
 .idea/
 *.swp
+
+# Complete package directories (deployment packages - too large for git)
+VISTA3D_Complete_Package/
+VISTA3D_Complete_Package.zip
+VISTA3D_Minimal_Package/
+VISTA3D_Minimal_Package.zip
+Test_Extract/
+
+# Large deployment zip files
+vista3d_executable.zip
