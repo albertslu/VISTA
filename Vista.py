@@ -7,7 +7,7 @@ This service monitors a folder for task files and automatically runs
 VISTA3D segmentation based on the specifications in each task.
 
 Usage:
-    python vista_service.py --config config.json
+    python Vista.py --config config.json
 """
 
 import os
@@ -420,23 +420,14 @@ def run_vista3d_task(task_data, config):
                 prompt_spec = detail['prompt_spec']
                 target_label = prompt_spec["target_output_label"]
                 display_name = prompt_spec.get("display_name", f"Label {target_label}")
+                roi_color = prompt_spec.get("color", [0.8, 0.5, 0.2])
                 rois_for_current_task.append({
                     "ROIIndex": target_label,
                     "ROIName": display_name,
+                    "ROIColor": roi_color,
                     "ROICenter": detail['physical_center_from_task'], 
                     "visible": True 
                 })
-            
-            roi_colors = [
-                [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0], [0.5, 0.5, 1.0],
-                [0.0, 0.5, 1.0], [1.0, 0.5, 1.0], [1.0, 0.5, 0.0], [0.2, 0.5, 0.2],
-                [0.2, 0.8, 0.4], [1.0, 0.0, 0.5], [0.5, 0.0, 0.0], [0.0, 0.5, 0.0],
-                [1.0, 0.0, 0.5], [0.0, 0.5, 0.5], [0.5, 0.0, 1.0], [1.0, 0.2, 0.2],
-                [0.7, 0.7, 0.0], [0.2, 0.2, 0.7], [0.0, 0.7, 0.7], [0.7, 0.0, 0.7],
-                [0.7, 0.5, 0.2], [0.4, 0.7, 0.2], [0.8, 0.2, 0.8], [0.8, 0.8, 0.2],
-                [0.2, 0.8, 0.8], [0.8, 0.2, 0.2], [0.5, 0.2, 0.7], [0.7, 0.5, 0.7],
-                [0.5, 0.7, 0.2], [0.2, 0.7, 0.5], [0.7, 0.2, 0.5]
-            ]
             
             num_prompts_in_task = len(task_data.get("segmentation_prompts", []))
             final_json_content_rois = []
@@ -453,16 +444,7 @@ def run_vista3d_task(task_data, config):
                         final_json_content_rois.append(existing_roi_entry)
                 logger.info(f"Multiple/zero prompts task: Merged/formed {len(final_json_content_rois)} ROIs for {vista_roi_path}.")
 
-            final_json_content_rois.sort(key=lambda r: r['ROIIndex']) 
-            unique_labels_in_final_json = [r['ROIIndex'] for r in final_json_content_rois]
-
-            for roi_entry in final_json_content_rois:
-                try:
-                    color_idx = unique_labels_in_final_json.index(roi_entry['ROIIndex'])
-                    roi_entry['ROIColor'] = roi_colors[color_idx % len(roi_colors)]
-                except ValueError:
-                    logger.warning(f"Could not find ROIIndex {roi_entry['ROIIndex']} in unique_labels_in_final_json for color assignment. Using default.")
-                    roi_entry['ROIColor'] = [0.5, 0.5, 0.5]
+            final_json_content_rois.sort(key=lambda r: r['ROIIndex'])
 
 
             with open(vista_roi_path, 'w') as f_final_roi:
